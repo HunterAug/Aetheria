@@ -25,16 +25,23 @@ impl FreenetBridge {
         })
     }
 
+    // Not called yet - the current milestone only exercises the publisher's
+    // own publish/feed/read loop against the local SQLite cache. These get
+    // wired in once a local Freenet node is actually running to develop
+    // against (see module docs).
+    #[allow(dead_code)]
     pub async fn get_state(&self, contract_id: &str) -> Result<Vec<u8>> {
         let _ = contract_id;
         todo!("Freenet GET not yet implemented")
     }
 
+    #[allow(dead_code)]
     pub async fn put_state(&self, contract_id: &str, state: &[u8]) -> Result<()> {
         let _ = (contract_id, state);
         todo!("Freenet PUT not yet implemented")
     }
 
+    #[allow(dead_code)]
     pub async fn subscribe(&self, contract_id: &str) -> Result<()> {
         let _ = contract_id;
         todo!("Freenet SUBSCRIBE not yet implemented")

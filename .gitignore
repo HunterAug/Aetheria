@@ -14,11 +14,14 @@ app/src-tauri/target/
 # Tauri build outputs
 app/src-tauri/gen/
 
-# Local SQLite / Delegate runtime data
+# Local SQLite / Delegate runtime data (real location is the OS app-data
+# dir via `directories::ProjectDirs`, not this repo - these patterns are
+# just a safety net in case a build ever writes locally).
 *.sqlite
 *.sqlite3
 *.db
 delegate/data/
+delegate/delegate/
 
 # Env / secrets
 .env

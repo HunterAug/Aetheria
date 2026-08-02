@@ -17,7 +17,8 @@ mod ipc;
 mod keys;
 mod nwc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use directories::ProjectDirs;
 
 /// Local WebSocket port the UI (React/Tauri) connects to for IPC.
 /// Port 3000 is reserved for the frontend dev server on this machine, so the
@@ -28,7 +29,7 @@ pub const IPC_PORT: u16 = 47_021;
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
-    let data_dir = dirs_local_data_dir();
+    let data_dir = local_data_dir()?;
     std::fs::create_dir_all(&data_dir)?;
 
     let db = db::LocalStore::open(&data_dir.join("aetheria.sqlite"))?;
@@ -45,10 +46,16 @@ async fn main() -> Result<()> {
     ipc::serve(IPC_PORT, db, keys, freenet, nwc).await
 }
 
-fn dirs_local_data_dir() -> std::path::PathBuf {
-    // TODO: use a proper platform data-dir crate (e.g. `directories`) once
-    // dependencies are finalized; for now default to a repo-local folder.
-    std::path::PathBuf::from("delegate/data")
+/// Platform-appropriate app data directory (e.g. `%APPDATA%\aetheria\aetheria-delegate\data`
+/// on Windows). Deliberately *not* a path relative to the process's working
+/// directory - a relative path meant different locations depending on
+/// whether the daemon was launched from `delegate/`, the repo root, or (once
+/// Tauri spawns it) some other directory entirely, which silently forked the
+/// SQLite cache and identity key across multiple stray folders.
+fn local_data_dir() -> Result<std::path::PathBuf> {
+    let dirs = ProjectDirs::from("com", "aetheria", "aetheria-delegate")
+        .context("could not determine a platform data directory")?;
+    Ok(dirs.data_dir().to_path_buf())
 }
 
 fn hex_encode(bytes: &[u8]) -> String {

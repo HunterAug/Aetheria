@@ -52,6 +52,9 @@ pub fn decrypt_payload(key: &EpochKey, nonce: &[u8; 12], cipher_text: &[u8]) -> 
 }
 
 /// Publisher side: derive Si = HKDF(ECDH(SKpub, PKsub,i)) for a subscriber.
+// Not called yet - wired up once the NWC payment listener (nwc.rs) triggers
+// real per-subscriber key delivery in Phase 3.
+#[allow(dead_code)]
 pub fn derive_shared_secret(
     publisher_secret: &K256SecretKey,
     subscriber_public: &K256PublicKey,
@@ -69,6 +72,7 @@ pub fn derive_shared_secret(
 
 /// Subscriber side: derive the same Si using their secret and the
 /// publisher's public key (ECDH is symmetric: Si is identical either way).
+#[allow(dead_code)]
 pub fn derive_shared_secret_as_subscriber(
     subscriber_secret: &K256SecretKey,
     publisher_public: &K256PublicKey,
@@ -77,11 +81,13 @@ pub fn derive_shared_secret_as_subscriber(
 }
 
 /// Encrypt Kepoch for a specific subscriber using their shared secret Si.
+#[allow(dead_code)]
 pub fn wrap_epoch_key(shared_secret: &[u8; 32], epoch_key: &EpochKey) -> Result<Ciphertext> {
     encrypt_payload(shared_secret, epoch_key)
 }
 
 /// Recover Kepoch from an encrypted key bundle using the shared secret Si.
+#[allow(dead_code)]
 pub fn unwrap_epoch_key(
     shared_secret: &[u8; 32],
     nonce: &[u8; 12],

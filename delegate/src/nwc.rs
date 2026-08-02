@@ -10,6 +10,7 @@
 use anyhow::Result;
 
 pub struct NwcClient {
+    #[allow(dead_code)]
     connection_uri: Option<String>,
 }
 
@@ -22,6 +23,7 @@ impl NwcClient {
 
     /// Connect using a `nostr+walletconnect://...` URI exported from a
     /// wallet such as Alby, Mutiny, or Phoenix.
+    #[allow(dead_code)]
     pub async fn connect(&mut self, uri: &str) -> Result<()> {
         self.connection_uri = Some(uri.to_string());
         // TODO(Phase 3): open relay connection, verify wallet pubkey.
@@ -31,6 +33,7 @@ impl NwcClient {
     /// Request a Lightning invoice for a subscription payment.
     ///
     /// Mirrors the `make_invoice` NIP-47 method shown in design doc 6.1.
+    #[allow(dead_code)]
     pub async fn make_invoice(&self, amount_msat: u64, description: &str) -> Result<String> {
         let _ = (amount_msat, description);
         todo!("NIP-47 make_invoice RPC not yet implemented")
@@ -38,6 +41,7 @@ impl NwcClient {
 
     /// Poll/subscribe for the preimage confirming a previously requested
     /// invoice was paid.
+    #[allow(dead_code)]
     pub async fn wait_for_preimage(&self, invoice: &str) -> Result<String> {
         let _ = invoice;
         todo!("NIP-47 payment notification listener not yet implemented")
