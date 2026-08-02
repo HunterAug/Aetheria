@@ -2,10 +2,11 @@ import { useState } from "react";
 import Editor from "./components/Editor";
 import ReaderFeed from "./components/ReaderFeed";
 import SubscriberPortal from "./components/SubscriberPortal";
+import About from "./components/About";
 import Sidebar from "./components/Sidebar";
 import RightRail from "./components/RightRail";
 
-export type Tab = "editor" | "feed" | "subscribers";
+export type Tab = "editor" | "feed" | "subscribers" | "about";
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("feed");
@@ -19,6 +20,7 @@ export default function App() {
           {tab === "editor" && <Editor />}
           {tab === "feed" && <ReaderFeed />}
           {tab === "subscribers" && <SubscriberPortal />}
+          {tab === "about" && <About />}
         </main>
 
         <RightRail />

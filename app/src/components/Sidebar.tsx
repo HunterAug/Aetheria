@@ -1,10 +1,11 @@
-import { EditIcon, HomeIcon, PlusIcon, UsersIcon } from "./icons";
+import { EditIcon, HomeIcon, InfoIcon, PlusIcon, UsersIcon } from "./icons";
 import type { Tab } from "../App";
 
 const NAV: { id: Tab; label: string; icon: (p: { className?: string }) => JSX.Element }[] = [
   { id: "feed", label: "Home", icon: HomeIcon },
   { id: "editor", label: "Draft", icon: EditIcon },
   { id: "subscribers", label: "Subscribers", icon: UsersIcon },
+  { id: "about", label: "About", icon: InfoIcon },
 ];
 
 export default function Sidebar({
