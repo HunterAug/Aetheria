@@ -44,3 +44,21 @@ anyhow = "1"
 thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = "0.3"
+
+# Nostr Wallet Connect (NIP-47) client - rust-nostr project. This is the
+# stable 0.44.0 release (0.45.x is alpha-only as of 2026-08, see delegate's
+# nwc.rs module docs for the version survey). It's a *client* crate only (it
+# talks to a wallet service, it doesn't implement one) - that's exactly the
+# role both the publisher (calling make_invoice/lookup_invoice against their
+# own receiving wallet) and the reader (calling pay_invoice against their own
+# paying wallet) need; see nwc.rs for how one client type serves both roles.
+nwc = "0.44"
+
+[dev-dependencies]
+# Only pulled in for `examples/` - a hand-built mock NIP-47 *wallet service*
+# used to exercise the real protocol mechanics (real relay, real NIP-04
+# encrypted events) without needing real Lightning funds. `nwc` only
+# implements the client side of NIP-47, not a wallet service, so the mock
+# wallet is built directly on `nostr-sdk`'s lower-level Client/EventBuilder
+# API instead. Not a runtime dependency of the shipped delegate binary.
+nostr-sdk = "0.44"

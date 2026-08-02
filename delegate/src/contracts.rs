@@ -24,7 +24,7 @@
 //! either contract's state shape changes.
 
 use crate::{db::LocalStore, freenet_bridge::FreenetBridge, keys::DelegateKeys};
-use aetheria_types::{AccessTier, EncryptedPostPayload, PostMetadataHeader, Tier};
+use aetheria_types::{AccessTier, EncryptedKeyBundle, EncryptedPostPayload, PostMetadataHeader, Tier};
 use anyhow::{Context, Result};
 use ed25519_dalek::Signer;
 use freenet_stdlib::prelude::{CodeHash, ContractCode, ContractInstanceId, ContractKey, Parameters};
@@ -40,6 +40,9 @@ const CONTENT_INDEX_CONTRACT_WASM: &[u8] =
 const PUBLISHER_PROFILE_CONTRACT_WASM: &[u8] = include_bytes!(
     "../../contracts/publisher-profile-contract/build/freenet/publisher_profile_contract"
 );
+const SUBSCRIBER_REGISTRY_CONTRACT_WASM: &[u8] = include_bytes!(
+    "../../contracts/subscriber-registry-contract/build/freenet/subscriber_registry_contract"
+);
 
 fn load_code(bytes: &'static [u8]) -> Result<Arc<ContractCode<'static>>> {
     let (code, _version) = ContractCode::load_versioned_from_bytes(bytes.to_vec()).context(
@@ -54,6 +57,17 @@ struct ContentIndexState {
     publication_id: [u8; 32],
     posts: Vec<PostMetadataHeader>,
     last_sequence_num: u64,
+}
+
+/// Mirror of `subscriber_registry_contract::SubscriberRegistryState` - see
+/// module docs for why this is hand-copied rather than imported.
+/// `EncryptedKeyBundle` itself *is* imported directly from `aetheria-types`
+/// (unlike this struct) - it's a plain data type with no `#[contract]`
+/// macro involvement, so there's no WASM-export collision risk in sharing it.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct SubscriberRegistryState {
+    publication_id: [u8; 32],
+    bundles: Vec<EncryptedKeyBundle>,
 }
 
 /// Mirror of `publisher_profile_contract::PublisherProfile` - see module docs.
@@ -401,4 +415,160 @@ pub async fn publish_profile_to_network(
         .update_state(identity.profile_key, buf)
         .await
         .context("updating PublisherProfileContract")
+}
+
+// ---------------------------------------------------------------------
+// SubscriberRegistryContract - publisher-side key delivery (Workflow B,
+// design doc §5.2/6.1). Added as part of the NWC/ECDH subscription task;
+// deliberately kept separate from `ensure_publisher_identity` above (which
+// eagerly mints content_index/profile on every fresh identity) - a
+// publisher's registry is only minted lazily, the first time someone
+// actually subscribes, since publishing an empty one on every delegate
+// startup before anyone has paid would just be dead weight on the network.
+// ---------------------------------------------------------------------
+
+/// Deterministically computes a publisher's `SubscriberRegistryContract`
+/// instance key from their Ed25519 pubkey alone - **no network round trip,
+/// no discovery pointer field needed**. This works because
+/// `ContractKey::from_params_and_code` (`freenet_stdlib`) is a pure hash of
+/// `(code, params)` - the exact computation `FreenetBridge::put_new` does
+/// internally when it mints a new instance (see `WrappedContract::new`) - so
+/// any delegate holding the same compiled contract code (embedded in every
+/// Aetheria build, same as `PUBLISHER_PROFILE_CONTRACT_WASM` etc. above) and
+/// the publisher's public pubkey can independently arrive at the same key a
+/// publisher's own `ensure_subscriber_registry` call would produce or reuse.
+///
+/// Uses the same `author_pubkey` (Ed25519 master signing key) as `Parameters`
+/// that `ensure_publisher_identity` uses for `content_index`/
+/// `publisher_profile`/`avatar` above, for the same reason: it's the one
+/// pubkey a publisher's identity is already keyed on everywhere else, and
+/// the one a reader can read straight off a `PublisherProfileContract`.
+pub fn subscriber_registry_key_for(publisher_author_pubkey: [u8; 32]) -> Result<ContractKey> {
+    let code = load_code(SUBSCRIBER_REGISTRY_CONTRACT_WASM)?;
+    let params = Parameters::from(publisher_author_pubkey.to_vec());
+    Ok(ContractKey::from_params_and_code(&params, &*code))
+}
+
+/// Mint-once (first subscriber ever) + reuse pattern, same shape as
+/// `ensure_publisher_identity`'s content_index/profile handling above, but
+/// called lazily from the subscription path instead of on every startup.
+pub async fn ensure_subscriber_registry(
+    freenet: &FreenetBridge,
+    db: &LocalStore,
+    keys: &DelegateKeys,
+) -> Result<ContractKey> {
+    let author_pubkey = keys.master_signing_verifying_bytes();
+    match db.get_contract_registration("subscriber_registry")? {
+        Some((instance_id, code_hash)) => Ok(contract_key_from_registration(instance_id, code_hash)),
+        None => {
+            let code = load_code(SUBSCRIBER_REGISTRY_CONTRACT_WASM)?;
+            let params = Parameters::from(author_pubkey.to_vec());
+            let initial = SubscriberRegistryState {
+                publication_id: author_pubkey,
+                bundles: Vec::new(),
+            };
+            let mut buf = Vec::new();
+            ciborium::into_writer(&initial, &mut buf)?;
+            let key = freenet
+                .put_new(code, params, buf)
+                .await
+                .context("publishing initial SubscriberRegistryContract")?;
+            db.set_contract_registration(
+                "subscriber_registry",
+                key.id().as_bytes(),
+                key.code_hash().as_ref(),
+            )?;
+            tracing::info!(
+                contract_key = %key.encoded_contract_id(),
+                "published SubscriberRegistryContract"
+            );
+            debug_assert_eq!(
+                key.id(),
+                subscriber_registry_key_for(author_pubkey)?.id(),
+                "put_new's returned key must match the pure local computation - if this ever \
+                 fires, subscriber_registry_key_for's discovery-free design assumption is wrong"
+            );
+            Ok(key)
+        }
+    }
+}
+
+/// Publisher-side half of Workflow B once a payment's been verified:
+/// encrypts and appends a per-subscriber `EncryptedKeyBundle`
+/// (`crypto::wrap_epoch_key` already produced the ciphertext - this just
+/// publishes it). Fetches current state first (a fresh read, not a locally
+/// cached copy) so a concurrent bundle from a different subscriber isn't
+/// clobbered by a stale full-state resend - same read-modify-write shape
+/// `publish_post_to_network` uses for `ContentIndexContract` above.
+pub async fn publish_key_bundle_to_network(
+    freenet: &FreenetBridge,
+    db: &LocalStore,
+    keys: &DelegateKeys,
+    bundle: EncryptedKeyBundle,
+) -> Result<ContractKey> {
+    let registry_key = ensure_subscriber_registry(freenet, db, keys).await?;
+
+    let current = freenet
+        .get_state(*registry_key.id())
+        .await
+        .context("fetching current SubscriberRegistryContract state")?;
+    let mut state: SubscriberRegistryState = match current {
+        Some(bytes) => ciborium::from_reader(bytes.as_slice())
+            .context("decoding SubscriberRegistryContract state")?,
+        None => SubscriberRegistryState {
+            publication_id: keys.master_signing_verifying_bytes(),
+            bundles: Vec::new(),
+        },
+    };
+    state.bundles.retain(|b| {
+        !(b.subscriber_pubkey == bundle.subscriber_pubkey && b.epoch_id == bundle.epoch_id)
+    });
+    state.bundles.push(bundle);
+
+    let mut buf = Vec::new();
+    ciborium::into_writer(&state, &mut buf)?;
+    freenet
+        .update_state(registry_key, buf)
+        .await
+        .context("updating SubscriberRegistryContract")?;
+    Ok(registry_key)
+}
+
+/// Reader-side lookup: locates `publisher_author_pubkey`'s
+/// `SubscriberRegistryContract` (recomputing its key locally - see
+/// `subscriber_registry_key_for`, no discovery call needed to find *which*
+/// contract to ask) and looks for a bundle issued to `subscriber_pubkey` for
+/// `epoch_id`. Purely network-facing - no local DB dependency - since the
+/// caller may be a completely different delegate/identity than whichever one
+/// published the bundle.
+///
+/// Not called from `ipc.rs` yet: this milestone's single-identity
+/// architecture means `handle_subscribe` never needs to *fetch* a bundle
+/// from someone else (subscriber and publisher are the same delegate, so the
+/// epoch key is already sitting in its own local `epoch_keys` table the
+/// moment `handle_subscribe` generates it). Verified directly instead, by
+/// `subscriber_registry_e2e_test.rs`'s independent-identity round trip -
+/// wiring this into a real "browse and subscribe to someone else's
+/// publication" reader UI is future work once that feature exists at all.
+#[allow(dead_code)]
+pub async fn fetch_key_bundle(
+    freenet: &FreenetBridge,
+    publisher_author_pubkey: [u8; 32],
+    subscriber_pubkey: [u8; 33],
+    epoch_id: u32,
+) -> Result<Option<EncryptedKeyBundle>> {
+    let registry_key = subscriber_registry_key_for(publisher_author_pubkey)?;
+    let current = freenet
+        .get_state(*registry_key.id())
+        .await
+        .context("fetching SubscriberRegistryContract state")?;
+    let Some(bytes) = current else {
+        return Ok(None);
+    };
+    let state: SubscriberRegistryState =
+        ciborium::from_reader(bytes.as_slice()).context("decoding SubscriberRegistryContract state")?;
+    Ok(state
+        .bundles
+        .into_iter()
+        .find(|b| b.subscriber_pubkey == subscriber_pubkey && b.epoch_id == epoch_id))
 }

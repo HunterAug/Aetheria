@@ -52,9 +52,9 @@ pub fn decrypt_payload(key: &EpochKey, nonce: &[u8; 12], cipher_text: &[u8]) -> 
 }
 
 /// Publisher side: derive Si = HKDF(ECDH(SKpub, PKsub,i)) for a subscriber.
-// Not called yet - wired up once the NWC payment listener (nwc.rs) triggers
-// real per-subscriber key delivery in Phase 3.
-#[allow(dead_code)]
+/// Called from `ipc.rs`'s `handle_subscribe` (Phase 3, NWC payment flow) and
+/// exercised independently (two separate identities) by
+/// `subscriber_registry_e2e_test.rs`.
 pub fn derive_shared_secret(
     publisher_secret: &K256SecretKey,
     subscriber_public: &K256PublicKey,
@@ -72,6 +72,11 @@ pub fn derive_shared_secret(
 
 /// Subscriber side: derive the same Si using their secret and the
 /// publisher's public key (ECDH is symmetric: Si is identical either way).
+/// Not called from the shipped IPC path yet - this milestone's
+/// single-identity architecture means `handle_subscribe` never needs a
+/// distinct "subscriber decrypts" step (see CLAUDE.md's NWC section) - but
+/// exercised for real by `subscriber_registry_e2e_test.rs`, which uses two
+/// genuinely independent identities.
 #[allow(dead_code)]
 pub fn derive_shared_secret_as_subscriber(
     subscriber_secret: &K256SecretKey,
@@ -81,12 +86,14 @@ pub fn derive_shared_secret_as_subscriber(
 }
 
 /// Encrypt Kepoch for a specific subscriber using their shared secret Si.
-#[allow(dead_code)]
+/// Called from `ipc.rs`'s `handle_subscribe`.
 pub fn wrap_epoch_key(shared_secret: &[u8; 32], epoch_key: &EpochKey) -> Result<Ciphertext> {
     encrypt_payload(shared_secret, epoch_key)
 }
 
 /// Recover Kepoch from an encrypted key bundle using the shared secret Si.
+/// Same "not called from shipped IPC yet, but real" status as
+/// `derive_shared_secret_as_subscriber` above.
 #[allow(dead_code)]
 pub fn unwrap_epoch_key(
     shared_secret: &[u8; 32],

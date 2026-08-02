@@ -20,6 +20,7 @@ use aes_gcm::{Aes256Gcm, Nonce};
 use anyhow::{Context, Result};
 use argon2::Argon2;
 use ed25519_dalek::{SigningKey, VerifyingKey};
+use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::SecretKey as K256SecretKey;
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -127,6 +128,21 @@ impl DelegateKeys {
 
     pub fn master_signing_verifying_bytes(&self) -> [u8; 32] {
         VerifyingKey::from(&self.master_signing).to_bytes()
+    }
+
+    /// Compressed SEC1 encoding of this delegate's secp256k1 identity public
+    /// key - the 33-byte form `EncryptedKeyBundle::subscriber_pubkey` and
+    /// `crypto.rs`'s ECDH helpers use everywhere (1 parity byte + 32-byte
+    /// x-coordinate). There's only one secp256k1 identity per delegate; it
+    /// plays whichever ECDH role (`derive_shared_secret`'s "publisher" or
+    /// "subscriber" argument) a given exchange calls for, since ECDH is
+    /// symmetric in the key that's used, not in a type-level distinction.
+    pub fn identity_public_compressed(&self) -> [u8; 33] {
+        let point = self.identity_secret.public_key().to_encoded_point(true);
+        point
+            .as_bytes()
+            .try_into()
+            .expect("SEC1 compressed point is 33 bytes")
     }
 }
 

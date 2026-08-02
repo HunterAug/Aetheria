@@ -17,6 +17,8 @@ mod freenet_bridge;
 mod ipc;
 mod keys;
 mod nwc;
+#[cfg(test)]
+mod subscriber_registry_e2e_test;
 
 use anyhow::{Context, Result};
 use directories::ProjectDirs;

@@ -359,22 +359,122 @@ real `cargo build --release` output into
 rebuild once the delegate compiles clean again, before treating this as a
 real release artifact.
 
+## NWC subscription flow: real ECDH key delivery + real NIP-47 (as of 2026-08-02)
+
+Phase 3 (design doc §5.2/6.1, Workflow B) is implemented: a reader connects a
+Lightning wallet via Nostr Wallet Connect, subscribes to a tier, and gets an
+ECDH-encrypted epoch key bundle appended to a real `SubscriberRegistryContract`
+on the real Freenet network. Three things were built and are worth
+distinguishing by how thoroughly each was actually verified:
+
+**(a) Verified for real, with concrete evidence:**
+
+- **ECDH key delivery + `SubscriberRegistryContract` over the real network.**
+  `delegate/src/contracts.rs` gained `subscriber_registry_key_for` (a *pure,
+  local* computation - `ContractKey::from_params_and_code(params, code)` is
+  a deterministic hash, the same one `FreenetBridge::put_new` computes
+  internally, so any delegate holding the same compiled contract code and a
+  publisher's Ed25519 pubkey can independently derive their
+  `SubscriberRegistryContract` key with **no discovery call, no pointer
+  field anywhere** - this is why the contract doesn't need a "where do I
+  find this" field), plus `ensure_subscriber_registry` (mint-once, lazy -
+  only the first time someone actually subscribes, unlike
+  `ensure_publisher_identity`'s eager content_index/profile),
+  `publish_key_bundle_to_network` (publisher side), and `fetch_key_bundle`
+  (reader side, network-only, no local DB dependency).
+  `delegate/src/subscriber_registry_e2e_test.rs` (`#[cfg(test)]`, declared
+  from `main.rs`, `#[ignore]`d since it needs a live node - run with `cargo
+  test subscriber_registry_e2e -- --ignored --nocapture`) simulates two
+  *genuinely independent* secp256k1 identities (not the single-identity
+  degenerate case the IPC handler exercises) round-tripping a real epoch key
+  through the real network: publisher encrypts, publishes; a second,
+  independent `FreenetBridge` connection (standing in for a different
+  process) fetches and decrypts using only its own secret + the publisher's
+  known public keys, and recovers the exact same epoch key. Independently
+  re-confirmed both this test's contract and the full IPC `subscribe` flow's
+  contract with `fdev -p 7509 execute get <key>` from a separate shell (same
+  methodology as the post-data/content-index verification above) - real CBOR
+  bytes, real `bundles` array, matching `EncryptedKeyBundle`'s schema.
+- **Real NIP-47 protocol mechanics, over a real public relay, zero real
+  money.** `delegate/src/nwc.rs` uses the `nwc` crate (rust-nostr project,
+  pinned to the stable `0.44.0` - `0.45.x` is alpha-only as of 2026-08, see
+  that file's module docs for the version survey and for working out the
+  actual request direction from the real NIP-47 spec instead of the design
+  doc's misleading §6.1 wire sketch). `nwc` only implements the *client*
+  side of NIP-47 (talks to a wallet you already have), so there was no
+  ready-made way to test it without a funded real wallet - solved the same
+  way this project solved "no external infra to test against" for Freenet
+  (`fdev` + a local node): built a mock NIP-47 *wallet service* directly on
+  `nostr-sdk` (dev-dependency only, not shipped) in
+  `delegate/examples/nwc_protocol_check.rs` - real Nostr keys, a real
+  connection to `wss://nos.lol` (public relay; `wss://relay.damus.io`
+  intermittently 503s, use `AETHERIA_NWC_TEST_RELAY` to override), real
+  kind 13194/23194/23195 events, real NIP-04 encryption. It drives two
+  independent `nwc::NWC` client connections (different per-app secrets, same
+  mock wallet pubkey - exactly how one real wallet serves multiple apps)
+  through `make_invoice` → `pay_invoice` → `lookup_invoice`, and passed:
+  `cargo run --example nwc_protocol_check` prints the full encrypted
+  request/response trace and a final PASS. `delegate/examples/mock_nwc_wallet.rs`
+  is the same mock wallet as a long-running process (prints its connection
+  URI) - used to drive the **actual production code**, not just the
+  protocol-check harness: ran the real `aetheria-delegate` binary
+  (`AETHERIA_DEV_PASSPHRASE` set, this machine's real existing identity) and
+  called `connect_wallet` → `get_subscription_info` → `subscribe` →
+  `list_subscribers` over the real IPC socket (a small Python
+  `websockets` script, `cargo run` doesn't apply here). Real
+  `SubscriberRegistryContract` key `DuxRTe51t6WTwpnFiHGDeX1egRQGC1ZA7shs8TgxPwEM`
+  was independently confirmed via `fdev execute get` afterward.
+- **`SubscriberPortal.tsx` end-to-end in the browser.** Real "Connect
+  Wallet" input (paste a `nostr+walletconnect://...` URI), real tier
+  display, real "Subscribe" action - all driven through
+  `app/src/lib/delegate.ts`'s new `connectWallet`/`getSubscriptionInfo`/
+  `subscribe`/`listSubscribers` methods, no placeholders. Verified rendering
+  real data (the real publication key, the hardcoded tier, and the real
+  subscriber entry from the `list_subscribers` test above) via the Vite dev
+  server against the real running delegate.
+
+**(b) Built correctly per spec, not fully verifiable without real funds:**
+
+- A real end-to-end payment against a **real funded Lightning wallet** was
+  never attempted, per this task's explicit scope (no real money/sats, no
+  signing up for any funded service). `NwcClient::pay_invoice` is exercised
+  above only against the mock wallet's fake settlement - the NIP-47 wire
+  mechanics are proven real, but real Lightning settlement itself (routing,
+  fees, actual on-chain/off-chain finality) is the one piece that
+  genuinely needs the user's own wallet to verify.
+
+**(c) Left as TODO, matching this task's explicit scope:**
+
+- `default_tiers()` in `ipc.rs` hardcodes a single "Supporter" tier
+  (5,000 sats/month) - real multi-tier configuration in Settings
+  (populating `PublisherProfile.subscription_tiers`, still always `vec![]`
+  from `ensure_publisher_identity`) was explicitly out of scope.
+- `handle_subscribe` verifies settlement via NIP-47 `lookup_invoice` polling
+  rather than the optional real-time notification extension (kind 23196) -
+  `lookup_invoice` is base-spec, universally supported; notifications are
+  an add-on some wallets skip. See `nwc.rs`'s module docs.
+- A reader subscribing to a publication that *isn't* their own identity has
+  no UI yet - this app has no concept of browsing other publications at all
+  (same limitation the existing single-identity publish/feed loop already
+  has, see above). `contracts::fetch_key_bundle` is real, tested, and ready
+  for that reader-side code path once it exists; it's just not called from
+  `ipc.rs` yet.
+
 ## Known stub / unimplemented areas
 
-- `delegate/src/nwc.rs` — no real NWC/Nostr relay connection yet (Phase 3).
-- `SubscriberRegistryContract` — untouched; no real NWC subscriber flow
-  exists yet for it to serve (Phase 3), so it's still unwired on purpose.
 - `FreenetBridge::subscribe` — sends nothing, still `todo!()`
   (`// TODO(Phase 4)`); nothing in the delegate consumes the
   `UpdateNotification` push responses a real subscription would trigger
   (pinning daemon / live feed updates, design doc §7-8), so wiring the send
   half up now would be a silent no-op.
-- ECDH-based subscriber key delivery (`crypto::derive_shared_secret` and
-  friends) is implemented but not called from anywhere yet — needs the NWC
-  payment listener to trigger it (Phase 3).
 - Per-post subscription tier is hardcoded to `required_tier_id: 0`
   (`ipc.rs`'s `handle_publish_post`) — the UI doesn't expose multiple tiers
   yet, and neither does the fresh `PublisherProfile` the delegate publishes
   on first run (`subscription_tiers: vec![]`, `title: "Untitled Publication"`).
+- Real Lightning payment settlement against a funded wallet - see the NWC
+  section above; everything up to and including the protocol/network layer
+  is verified, real money movement is not.
+- Browsing/subscribing to a publication other than this delegate's own
+  identity - no discovery UI exists yet; see the NWC section above.
 - Proof-of-work spam mitigation (design doc §7) and the pinning daemon
   (§7, §8 Phase 4) are not started.

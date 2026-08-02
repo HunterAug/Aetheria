@@ -37,6 +37,39 @@ export interface UpdateProfileResult extends Profile {
   network_error: string | null;
 }
 
+export interface Tier {
+  tier_id: number;
+  name: string;
+  price_sats_per_month: number;
+  features: string[];
+}
+
+export interface SubscriptionInfo {
+  /// This publication's Ed25519 pubkey (hex) - what a reader's Delegate
+  /// would use to locate the `SubscriberRegistryContract` on Freenet.
+  publisher_pubkey: string;
+  /// This delegate's own secp256k1 identity pubkey (hex, compressed) - the
+  /// `EncryptedKeyBundle.subscriber_pubkey` a bundle addressed to "you"
+  /// would be keyed on.
+  subscriber_pubkey: string;
+  tiers: Tier[];
+  wallet_connected: boolean;
+}
+
+export interface SubscribeResult {
+  tier_id: number;
+  epoch_id: number;
+  preimage: string;
+  network_synced: boolean;
+  network_error: string | null;
+}
+
+export interface SubscriberEntry {
+  subscriber_pubkey: string;
+  epoch_id: number;
+  issued_at: number;
+}
+
 interface PendingEntry {
   resolve: (value: unknown) => void;
   reject: (reason: unknown) => void;
@@ -122,6 +155,28 @@ class DelegateClient {
     avatar_data_url?: string | null;
   }): Promise<UpdateProfileResult> {
     return this.call("update_profile", input);
+  }
+
+  /// Connect a Lightning wallet via Nostr Wallet Connect (NIP-47) - a
+  /// `nostr+walletconnect://...` URI exported from a wallet such as Alby,
+  /// Mutiny, Phoenix, or Umbrel.
+  connectWallet(uri: string): Promise<{ connected: boolean }> {
+    return this.call("connect_wallet", { uri });
+  }
+
+  getSubscriptionInfo(): Promise<SubscriptionInfo> {
+    return this.call("get_subscription_info");
+  }
+
+  /// Pays for `tier_id` via the connected wallet, then (once settlement is
+  /// verified) delivers an ECDH-encrypted epoch key bundle. Requires a
+  /// wallet to already be connected via `connectWallet`.
+  subscribe(tierId: number): Promise<SubscribeResult> {
+    return this.call("subscribe", { tier_id: tierId });
+  }
+
+  listSubscribers(): Promise<SubscriberEntry[]> {
+    return this.call("list_subscribers");
   }
 }
 

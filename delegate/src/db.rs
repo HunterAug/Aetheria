@@ -67,6 +67,14 @@ pub struct PostRow {
     pub post_contract_id: Option<String>,
 }
 
+/// A locally-recorded grant of subscriber access - see `LocalStore::record_subscriber`.
+pub struct SubscriberRow {
+    /// Compressed SEC1 secp256k1 pubkey (33 bytes).
+    pub subscriber_pubkey: Vec<u8>,
+    pub epoch_id: u32,
+    pub issued_at: u64,
+}
+
 impl LocalStore {
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)?;
@@ -343,6 +351,48 @@ impl LocalStore {
             params![display_name, bio, avatar_bytes, avatar_mime, updated_at as i64],
         )?;
         Ok(())
+    }
+
+    /// Records that this publisher just issued (or re-issued) an
+    /// `EncryptedKeyBundle` to `subscriber_pubkey` for `epoch_id` - a purely
+    /// local bookkeeping row for `list_subscribers` to render quickly,
+    /// written unconditionally the moment the delegate decides to grant
+    /// access (same local-first philosophy as `insert_post`/`set_profile`:
+    /// the decision to subscribe them is real regardless of whether the
+    /// network publish of the bundle itself, `contracts::publish_key_bundle_to_network`,
+    /// succeeds or is still retrying).
+    pub fn record_subscriber(
+        &self,
+        subscriber_pubkey: &[u8; 33],
+        epoch_id: u32,
+        issued_at: u64,
+    ) -> Result<()> {
+        self.conn.lock().expect("db mutex poisoned").execute(
+            "INSERT INTO subscribers (subscriber_pubkey, epoch_id, issued_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(subscriber_pubkey, epoch_id) DO UPDATE SET issued_at = excluded.issued_at",
+            params![subscriber_pubkey.as_slice(), epoch_id, issued_at as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Locally-recorded (subscriber pubkey, epoch) grants, most recent
+    /// first - see `record_subscriber`.
+    pub fn list_subscribers(&self) -> Result<Vec<SubscriberRow>> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT subscriber_pubkey, epoch_id, issued_at FROM subscribers ORDER BY issued_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let subscriber_pubkey: Vec<u8> = row.get(0)?;
+            let epoch_id: i64 = row.get(1)?;
+            let issued_at: i64 = row.get(2)?;
+            Ok(SubscriberRow {
+                subscriber_pubkey,
+                epoch_id: epoch_id as u32,
+                issued_at: issued_at as u64,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
     }
 
     pub fn get_epoch_key(&self, epoch_id: u32) -> Result<Option<[u8; 32]>> {

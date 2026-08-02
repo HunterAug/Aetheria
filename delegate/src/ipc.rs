@@ -22,7 +22,7 @@ use futures_util::{SinkExt, StreamExt};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
@@ -50,6 +50,30 @@ enum Request {
         #[serde(default)]
         avatar_data_url: Option<String>,
     },
+    /// Connect this delegate's Lightning wallet via Nostr Wallet Connect
+    /// (NIP-47) - a `nostr+walletconnect://...` URI exported from a wallet
+    /// such as Alby, Mutiny, Phoenix, or Umbrel. One wallet connection
+    /// serves both roles `Subscribe` needs (see `nwc.rs`'s module docs):
+    /// receiving payment (as a publisher) and paying (as a reader).
+    ConnectWallet {
+        uri: String,
+    },
+    /// This publication's subscription tiers, this delegate's own
+    /// subscriber-role pubkey (what a bundle addressed to "you" would be
+    /// keyed on), and whether a wallet is currently connected - everything
+    /// `SubscriberPortal.tsx` needs to render before a reader clicks Subscribe.
+    GetSubscriptionInfo,
+    /// Reader-role action: pay for `tier_id` via the connected wallet, then
+    /// (publisher-role, same delegate - see this milestone's single-identity
+    /// note in CLAUDE.md) verify settlement, derive the ECDH shared secret,
+    /// and append a fresh `EncryptedKeyBundle` to the `SubscriberRegistryContract`.
+    Subscribe {
+        tier_id: u8,
+    },
+    /// Publisher-role view: subscriber grants this delegate has issued,
+    /// from the local bookkeeping table (`LocalStore::record_subscriber`) -
+    /// not a live network re-fetch of the registry contract.
+    ListSubscribers,
 }
 
 #[derive(Deserialize)]
@@ -72,7 +96,6 @@ struct Delegate {
     db: LocalStore,
     keys: DelegateKeys,
     freenet: FreenetBridge,
-    #[allow(dead_code)]
     nwc: NwcClient,
     identity: PublisherIdentity,
 }
@@ -131,7 +154,7 @@ async fn handle_message(delegate: &Arc<Mutex<Delegate>>, text: &str) -> String {
         }
     };
 
-    let d = delegate.lock().await;
+    let mut d = delegate.lock().await;
     let outcome = match envelope.request {
         Request::ListPosts => handle_list_posts(&d),
         Request::GetPost { post_id } => handle_get_post(&d, &post_id),
@@ -147,6 +170,10 @@ async fn handle_message(delegate: &Arc<Mutex<Delegate>>, text: &str) -> String {
             bio,
             avatar_data_url,
         } => handle_update_profile(&d, &display_name, &bio, avatar_data_url.as_deref()).await,
+        Request::ConnectWallet { uri } => handle_connect_wallet(&mut d, &uri).await,
+        Request::GetSubscriptionInfo => handle_get_subscription_info(&d),
+        Request::Subscribe { tier_id } => handle_subscribe(&d, tier_id).await,
+        Request::ListSubscribers => handle_list_subscribers(&d),
     };
 
     let response = match outcome {
@@ -459,6 +486,161 @@ async fn handle_update_profile(
         "network_synced": profile_synced,
         "network_error": network_error,
     }))
+}
+
+/// Single hardcoded subscription tier, per this task's scope note: real
+/// multi-tier configuration in Settings is a TODO, not required for this
+/// milestone - see CLAUDE.md's "Known stub" section.
+fn default_tiers() -> Vec<aetheria_types::Tier> {
+    vec![aetheria_types::Tier {
+        tier_id: 0,
+        name: "Supporter".to_string(),
+        price_sats_per_month: 5_000,
+        features: vec!["Full access to subscriber-only posts".to_string()],
+    }]
+}
+
+async fn handle_connect_wallet(delegate: &mut Delegate, uri: &str) -> Result<serde_json::Value> {
+    delegate.nwc.connect(uri).await?;
+    Ok(serde_json::json!({ "connected": true }))
+}
+
+fn handle_get_subscription_info(delegate: &Delegate) -> Result<serde_json::Value> {
+    Ok(serde_json::json!({
+        "publisher_pubkey": hex::encode(delegate.keys.master_signing_verifying_bytes()),
+        "subscriber_pubkey": hex::encode(delegate.keys.identity_public_compressed()),
+        "tiers": default_tiers(),
+        "wallet_connected": delegate.nwc.is_connected(),
+    }))
+}
+
+/// Reader-role action (design doc §5.2, Workflow B) - pays for `tier_id` via
+/// the connected wallet, then (publisher-role - see this milestone's
+/// single-identity note in CLAUDE.md, both roles are the same delegate for
+/// now) verifies settlement and appends a fresh `EncryptedKeyBundle`.
+///
+/// Local-first/network-best-effort still applies to the *registry publish*
+/// step (`contracts::publish_key_bundle_to_network`) - the epoch key and the
+/// local subscriber-grant record are committed unconditionally once payment
+/// is verified, exactly like `handle_publish_post`'s post row and
+/// `handle_update_profile`'s profile row. It does *not* apply to the
+/// Lightning payment itself: `make_invoice`/`pay_invoice`/`wait_for_preimage`
+/// are real money movement (once a real wallet is connected), so a failure
+/// there fails the whole call rather than silently granting free access.
+async fn handle_subscribe(delegate: &Delegate, tier_id: u8) -> Result<serde_json::Value> {
+    let tier = default_tiers()
+        .into_iter()
+        .find(|t| t.tier_id == tier_id)
+        .ok_or_else(|| anyhow::anyhow!("unknown tier_id {tier_id}"))?;
+    anyhow::ensure!(
+        delegate.nwc.is_connected(),
+        "connect a Lightning wallet first (Nostr Wallet Connect)"
+    );
+
+    let amount_msat = tier.price_sats_per_month.saturating_mul(1000);
+    let description = format!(
+        "Aetheria Subscription: tier {} ({})",
+        tier.tier_id, tier.name
+    );
+
+    // Publisher role: mint an invoice against the connected wallet.
+    let invoice = delegate
+        .nwc
+        .make_invoice(amount_msat, &description)
+        .await
+        .context("requesting a Lightning invoice via NWC")?;
+
+    // Reader role: pay it, via the *same* connected wallet in this
+    // milestone's single-identity architecture (see nwc.rs's module docs -
+    // a real deployment has two different people each connecting their own
+    // wallet; nothing here assumes they're the same wallet, it just happens
+    // to be true today because there's only one identity to test with).
+    let claimed_preimage = delegate
+        .nwc
+        .pay_invoice(&invoice.bolt11)
+        .await
+        .context("paying the Lightning invoice via NWC")?;
+
+    // Publisher role again: verify settlement independently (design doc
+    // §5.2 step 5) rather than trusting the payer's own claim.
+    let confirmed_preimage = delegate
+        .nwc
+        .wait_for_preimage(&invoice.payment_hash, Duration::from_secs(30), Duration::from_secs(2))
+        .await
+        .context("verifying invoice settlement via NIP-47 lookup_invoice")?;
+    anyhow::ensure!(
+        confirmed_preimage == claimed_preimage,
+        "preimage mismatch between pay_invoice's response and lookup_invoice's - refusing to \
+         grant access"
+    );
+
+    // ECDH key delivery (crypto.rs, design doc §4.2).
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let epoch_id = current_epoch_id(now);
+    let epoch_key = delegate
+        .db
+        .get_or_create_epoch_key(epoch_id, crypto::generate_epoch_key, now)?;
+
+    let subscriber_pubkey = delegate.keys.identity_public_compressed();
+    let subscriber_public = k256::PublicKey::from_sec1_bytes(&subscriber_pubkey)
+        .context("decoding own compressed secp256k1 pubkey")?;
+    let shared_secret = crypto::derive_shared_secret(&delegate.keys.identity_secret, &subscriber_public);
+    let wrapped = crypto::wrap_epoch_key(&shared_secret, &epoch_key)?;
+
+    let bundle = aetheria_types::EncryptedKeyBundle {
+        subscriber_pubkey,
+        epoch_id,
+        cipher_text: wrapped.cipher_text,
+        nonce: wrapped.nonce,
+        auth_tag: [0u8; 16],
+        issued_at: now,
+    };
+
+    // Local write commits unconditionally, same philosophy as every other
+    // handler in this file - the delegate already decided to grant access
+    // (payment verified above), that's real regardless of what the network
+    // publish below does.
+    delegate
+        .db
+        .record_subscriber(&bundle.subscriber_pubkey, epoch_id, now)?;
+
+    let (registry_synced, network_error) =
+        match contracts::publish_key_bundle_to_network(&delegate.freenet, &delegate.db, &delegate.keys, bundle)
+            .await
+        {
+            Ok(_key) => (true, None),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "SubscriberRegistryContract publish failed after retries; access granted \
+                     locally only, not yet synced to the network"
+                );
+                (false, Some(e.to_string()))
+            }
+        };
+
+    Ok(serde_json::json!({
+        "tier_id": tier_id,
+        "epoch_id": epoch_id,
+        "preimage": confirmed_preimage,
+        "network_synced": registry_synced,
+        "network_error": network_error,
+    }))
+}
+
+fn handle_list_subscribers(delegate: &Delegate) -> Result<serde_json::Value> {
+    let rows = delegate.db.list_subscribers()?;
+    let json: Vec<_> = rows
+        .into_iter()
+        .map(|r| {
+            serde_json::json!({
+                "subscriber_pubkey": hex::encode(&r.subscriber_pubkey),
+                "epoch_id": r.epoch_id,
+                "issued_at": r.issued_at,
+            })
+        })
+        .collect();
+    Ok(serde_json::json!(json))
 }
 
 /// Minimal data-URL codec (`data:<mime>;base64,<payload>`) for the profile
