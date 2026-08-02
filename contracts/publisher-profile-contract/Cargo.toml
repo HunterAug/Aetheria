@@ -7,10 +7,20 @@ license.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# The #[contract] macro only emits the #[no_mangle] extern "C" WASM exports
+# (validate_state/update_state/summarize_state/get_state_delta) when this
+# feature is enabled on *this* crate - `cfg(feature = ...)` inside macro
+# output resolves against the destination crate, not freenet-stdlib. It's
+# on by default since each contract crate's only real artifact is that
+# WASM binary; disable it if this crate is ever pulled in as a plain rlib.
+default = ["freenet-main-contract"]
+freenet-main-contract = []
+
 [dependencies]
 aetheria-types = { path = "../aetheria-types" }
 serde = { workspace = true }
 ciborium = "0.2"
-freenet-stdlib = "0.8"
+freenet-stdlib = { version = "0.8", features = ["contract"] }
 ed25519-dalek = { workspace = true }
 serde-big-array = "0.5"

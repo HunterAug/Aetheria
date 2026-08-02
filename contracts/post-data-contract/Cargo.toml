@@ -7,8 +7,16 @@ license.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# See publisher-profile-contract/Cargo.toml for why this is needed: the
+# #[contract] macro's WASM export functions are gated on this feature,
+# checked against this crate (not freenet-stdlib), so it must be declared
+# and on by default here.
+default = ["freenet-main-contract"]
+freenet-main-contract = []
+
 [dependencies]
 aetheria-types = { path = "../aetheria-types" }
 serde = { workspace = true }
 ciborium = "0.2"
-freenet-stdlib = "0.8"
+freenet-stdlib = { version = "0.8", features = ["contract"] }
