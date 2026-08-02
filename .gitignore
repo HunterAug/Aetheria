@@ -24,6 +24,16 @@ app/src-tauri/gen/
 # be regenerated locally before `npm run tauri dev`/`build`.
 app/src-tauri/binaries/
 
+# `npm run build:desktop`'s copy of the latest installer/exe - see
+# app/scripts/copy-build-artifacts.mjs. Not source, regenerated per build.
+/builds/
+
+# Locally-installed agent skills (e.g. `npx skills add ...`) - machine-local
+# tooling, not project source.
+/.agents/
+/.claude/skills/
+skills-lock.json
+
 # Local SQLite / Delegate runtime data (real location is the OS app-data
 # dir via `directories::ProjectDirs`, not this repo - these patterns are
 # just a safety net in case a build ever writes locally).

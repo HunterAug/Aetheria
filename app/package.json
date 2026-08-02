@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "build:desktop": "tauri build && node scripts/copy-build-artifacts.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.1.1",
