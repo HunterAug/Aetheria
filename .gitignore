@@ -19,6 +19,11 @@ app/src-tauri/target/
 # Tauri build outputs
 app/src-tauri/gen/
 
+# Sidecar binary copied from delegate/target/{debug,release}/ at build/dev
+# time (see CLAUDE.md's "Desktop shell (Tauri)" section) - not source, must
+# be regenerated locally before `npm run tauri dev`/`build`.
+app/src-tauri/binaries/
+
 # Local SQLite / Delegate runtime data (real location is the OS app-data
 # dir via `directories::ProjectDirs`, not this repo - these patterns are
 # just a safety net in case a build ever writes locally).

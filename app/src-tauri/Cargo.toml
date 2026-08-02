@@ -9,12 +9,12 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+# Lets main.rs launch the aetheria-delegate daemon as a Tauri "sidecar"
+# (bundled external binary, spawned/killed as a managed child process) -
+# see tauri.conf.json's bundle.externalBin and main.rs's setup hook.
+tauri-plugin-shell = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-
-[lib]
-name = "aetheria_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
 
 [[bin]]
 name = "aetheria"

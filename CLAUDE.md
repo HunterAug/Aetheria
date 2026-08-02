@@ -235,6 +235,130 @@ identity's plaintext file was migrated using this env var on 2026-08-02
 this is not a secret worth protecting, treat it as public). Never set this
 outside a local dev loop.
 
+## Desktop shell (Tauri) — real window + auto-started delegate (as of 2026-08-02)
+
+`app/src-tauri/` now actually builds and runs. It was an early scaffold
+(`Cargo.toml`, `tauri.conf.json`, a placeholder icon) that had never been
+launched; getting `npm run tauri dev` (from `app/`) working for real
+surfaced a few problems, fixed as follows:
+
+- The scaffold's `Cargo.toml` had a `[lib] name = "aetheria_lib"` target
+  (for a mobile-capable `create-tauri-app` template) with no corresponding
+  `src/lib.rs` - `cargo metadata` failed outright (`can't find library
+  aetheria_lib`). Removed the `[lib]` section entirely; this app is
+  desktop-only (no iOS/Android targets planned), and all the logic already
+  lived in `src/main.rs`.
+- `tauri`/`tauri-build` bumped to the current 2.x line (2.11.x resolved from
+  `version = "2"`) - the scaffold's versions were already coherent Tauri v2,
+  just untested.
+- Added `tauri-plugin-shell = "2"` (2.3.5 resolved) to run the delegate as a
+  **sidecar** - Tauri's mechanism for bundling an external binary and
+  spawning/killing it as a managed child process
+  (https://v2.tauri.app/develop/sidecar/). `app/src-tauri/src/main.rs`'s
+  `.setup()` hook calls `app.shell().sidecar("aetheria-delegate")...spawn()`
+  on startup, and the `.run(|app_handle, event| ...)` closure kills the
+  child on `RunEvent::ExitRequested`/`RunEvent::Exit` so the delegate never
+  outlives the window (verified - see below). Since the frontend never
+  calls `invoke()` for anything (it talks to the delegate directly over the
+  `ws://127.0.0.1:47021` loopback socket, see `app/src/lib/delegate.ts`),
+  spawning the sidecar from Rust needed no capability/permission grant for
+  it; added a minimal `capabilities/default.json` (`core:default` only)
+  since Tauri v2 expects at least one capabilities file to exist.
+- **Sidecar binary naming**: Tauri resolves `externalBin` entries by
+  appending `-<host-target-triple><exe-suffix>` to the given name. With
+  `"externalBin": ["binaries/aetheria-delegate"]` in `tauri.conf.json` and
+  `.sidecar("aetheria-delegate")` in Rust, the actual file must exist at
+  `app/src-tauri/binaries/aetheria-delegate-x86_64-pc-windows-msvc.exe` on
+  this machine. That file is **not source** - it's a straight copy of
+  `delegate/target/{debug,release}/aetheria-delegate.exe`, gitignored
+  (`app/src-tauri/binaries/` in the root `.gitignore`), and must be
+  regenerated locally before `npm run tauri dev`/`build` after any delegate
+  rebuild:
+  ```
+  cp delegate/target/debug/aetheria-delegate.exe \
+     app/src-tauri/binaries/aetheria-delegate-x86_64-pc-windows-msvc.exe
+  ```
+  (swap `debug` for `release` for a production bundle).
+- **Vite/Tauri interaction bug**: `tauri dev` builds the Rust shell inside
+  `app/src-tauri/target/` while Vite's dev server is also running from
+  `app/`. Vite's default file watcher picks up churn in that directory
+  (including a build-script binary mid-write/locked by cargo), and on
+  Windows that throws an `EBUSY` error that crashes Vite's process instead
+  of just logging a warning - which in turn kills `tauri dev`'s
+  `beforeDevCommand` step. Fixed in `app/vite.config.ts` with
+  `server.watch.ignored: ["**/src-tauri/**"]`.
+- **Passphrase stopgap (temporary, not a real solution)**: the sidecar is
+  spawned with `AETHERIA_DEV_PASSPHRASE=aetheria-dev-local-only` and
+  `RUST_LOG=info` set via `.env(...)` in `main.rs`, so `delegate/src/keys.rs`'s
+  encrypted-identity unlock doesn't block forever on an `rpassword` prompt
+  with no attached terminal to read from (see the "Identity key encryption"
+  section above for why that prompt exists). This is marked with a
+  `// TODO(next):` comment in `main.rs`. The real fix is an in-app "enter
+  your passphrase to unlock" screen that sends a new `unlock { passphrase }`
+  IPC request to the delegate before any signing operation - deliberately
+  **not** implemented now because it needs changes to
+  `delegate/src/ipc.rs` and `delegate/src/keys.rs`, both of which a
+  concurrent session is actively editing for the NWC/Lightning payment
+  feature; touching them here would conflict. Follow-up work, tracked as
+  the main remaining gap in this area.
+- **Icons**: regenerated the full multi-resolution set with
+  `npx tauri icon ../logo.png` (run from `app/`, source is the real 1024x1024
+  logo at repo root / `app/public/logo.png`) - replaced the old placeholder
+  `icons/icon.png` with `icons/{32x32,64x64,128x128,128x128@2x,icon}.png`,
+  `icon.icns`, `icon.ico`, plus Android/iOS/Windows-Store variants the CLI
+  also generates unconditionally. `tauri.conf.json`'s `bundle.icon` now
+  lists the specific PNG/ICO/ICNS files Tauri's Windows/macOS bundlers
+  expect, not the old single placeholder path.
+
+**Verified end-to-end, 2026-08-02** (`npm run tauri dev` from `app/`, real
+window, not just the browser dev server):
+
+- A real native OS window titled "Aetheria" opens (confirmed via
+  `Get-Process aetheria | Select MainWindowTitle`, not just process
+  existence).
+- `aetheria-delegate.exe` auto-starts as a child of `aetheria.exe` with no
+  manual launch (process start timestamps one second apart), binds
+  `127.0.0.1:47021`, and the app's webview immediately opens a WebSocket to
+  it (confirmed via `netstat` showing an ESTABLISHED pair, and via the
+  delegate's own forwarded logs: identity unlocked non-interactively via the
+  dev passphrase, then "Freenet publisher identity ready" with the *same*
+  `content_index`/`publisher_profile` contract IDs already documented above
+  - i.e. it's genuinely reusing the real persisted identity/contracts, not
+    generating fresh ones).
+- The feed actually renders real posts (checked by pointing the browser
+  tool at the same `devUrl`, `http://localhost:5173`, which is the identical
+  content the native webview loads - the real posts from the "Working
+  end-to-end" section above all appeared).
+- Closing the window gracefully (`WM_CLOSE`, not a force-kill) exits both
+  `aetheria.exe` and `aetheria-delegate.exe` cleanly - confirms the
+  `RunEvent::Exit` cleanup handler in `main.rs` actually kills the sidecar
+  rather than leaking it. (A hard `TerminateProcess`/force-kill of
+  `aetheria.exe`, tested separately, does *not* run this cleanup - that's
+  expected of any process, not a bug, and not how a user closing the app
+  window behaves.)
+
+**`npm run tauri build`**: succeeded completely, producing both installers:
+`app/src-tauri/target/release/bundle/msi/Aetheria_0.1.0_x64_en-US.msi`
+(7.7MB) and `.../bundle/nsis/Aetheria_0.1.0_x64-setup.exe` (5.2MB) - Tauri
+downloaded WiX3 and NSIS toolchains on the fly, no manual installer tooling
+needed. No code-signing was configured (would need a cert), so both
+installers will show an "unknown publisher" warning on install - fine to
+leave unresolved per the task, noted here as a follow-up rather than a
+blocker.
+
+One caveat: the delegate's own `cargo build --release` was failing at build
+time due to unrelated in-progress edits from the concurrent NWC-feature
+session (`ipc.rs`/`db.rs` calling a `get_epoch_key` method that doesn't
+exist yet on `LocalStore` - not something to fix from here, and not touched).
+The sidecar binary bundled into this installer is therefore the **debug**
+build of `aetheria-delegate.exe` copied into `app/src-tauri/binaries/`
+before that breakage happened - functionally correct (it's the same binary
+verified working end-to-end above) but not release-optimized. Re-copy a
+real `cargo build --release` output into
+`app/src-tauri/binaries/aetheria-delegate-x86_64-pc-windows-msvc.exe` and
+rebuild once the delegate compiles clean again, before treating this as a
+real release artifact.
+
 ## Known stub / unimplemented areas
 
 - `delegate/src/nwc.rs` — no real NWC/Nostr relay connection yet (Phase 3).

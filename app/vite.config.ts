@@ -8,6 +8,16 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
+    // `tauri dev` builds the Rust shell in src-tauri/target/ while this dev
+    // server is running. Vite's default watcher otherwise picks up churn in
+    // there (including a build-script binary that's mid-write / locked by
+    // cargo), and on Windows that intermittently throws an EBUSY error that
+    // crashes the whole `beforeDevCommand` step instead of just logging a
+    // warning. None of that directory is frontend source, so ignore it
+    // wholesale.
+    watch: {
+      ignored: ["**/src-tauri/**"],
+    },
   },
   clearScreen: false,
 });
