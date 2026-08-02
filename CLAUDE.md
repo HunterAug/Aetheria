@@ -33,11 +33,46 @@ crypto flows, and the 16-week roadmap).
 - **Port 3000 is occupied by something else on this machine** — the Vite
   dev server uses **5173** instead, and the delegate's IPC WebSocket uses
   **47021**. Don't move either back onto 3000.
-- Freenet node websocket host address in `delegate/src/freenet_bridge.rs`
-  (`ws://127.0.0.1:50509/...`) is a placeholder — confirm the real local-node
-  address once a Freenet node is actually running here.
-- `.claude/launch.json` defines the `aetheria-frontend` preview server
-  (`npm run dev --prefix app` on port 5173) for the `preview_start` tool.
+- A real `freenet` node is installed and runs in normal (network) mode,
+  connected to the public gateway network — dashboard at
+  `http://127.0.0.1:7509/`. Its WebSocket API is `ws://127.0.0.1:7509/`
+  (root path, confirmed by reading `freenet-stdlib`'s `client_api` source
+  and by successfully round-tripping a contract through it - see below).
+  The node currently shows "only connected to gateways, NAT hole-punching
+  0/N" — that's about *other peers reaching this node*, not about this
+  node's own ability to GET/PUT contract state through its gateways, which
+  works fine (proven both by an official demo app loading through it and by
+  our own published test contract).
+- `fdev` (Freenet's dev CLI, crate `fdev` on crates.io — `cargo install fdev`,
+  currently 0.3.280) is installed. **Known bug**: `fdev build` panics
+  "Could not find workspace root" when installed via `cargo install` from
+  crates.io, because `get_workspace_target_dir()` in its `util.rs` uses
+  `env!("CARGO_MANIFEST_DIR")` - baked in at *fdev's own* compile time
+  (pointing into the cargo registry cache) - instead of the caller's actual
+  working directory, then searches that path's ancestors for a `[workspace]`
+  Cargo.toml and finds none. Workaround: set `CARGO_TARGET_DIR` yourself
+  before invoking (it short-circuits the broken lookup), e.g.
+  `CARGO_TARGET_DIR=./contracts/target fdev build` from inside a contract
+  crate dir. Also: every contract needs a `freenet.toml` next to its
+  `Cargo.toml` (`[contract]\ntype = "standard"\nlang = "rust"`) or `fdev
+  build`/`publish` refuse to run - all four contract crates have one.
+- **Verified 2026-08-02**: built `post-data-contract` with `fdev build`,
+  published a real `EncryptedPostPayload` state to the running local node
+  with `fdev -p 7509 publish --code <path> --subscribe contract --state
+  <cbor-file>`, and independently read it back with `fdev -p 7509 execute
+  get <contract-key>` - bytes matched exactly when decoded with our own
+  `aetheria-types::EncryptedPostPayload`. This is real Freenet network
+  integration (not the local-SQLite-only milestone below). Note flag order
+  matters: `--subscribe` goes *before* the `contract` subcommand, not after.
+  Also: `fdev publish ... --subscribe` prints an "Error: Unexpected contract
+  response: UpdateNotification { ... }" - that's `fdev`'s CLI failing to
+  parse a subscription push notification, not a real failure; the state
+  inside that error *is* your published data being echoed back.
+- `.claude/launch.json` defines two preview_start configs: `aetheria-frontend`
+  (`npm run dev --prefix app` on port 5173) and `freenet-node` (attaches to
+  the already-running node's dashboard at `http://127.0.0.1:7509`, no
+  process started). Browser-tool navigation to arbitrary localhost URLs is
+  otherwise blocked; use `preview_start` with a registered config instead.
 - The delegate's local data (SQLite cache + identity key) lives in the
   platform app-data dir via `directories::ProjectDirs` — on this machine
   that's `%APPDATA%\aetheria\aetheria-delegate\data\`. It is **not** relative
@@ -87,8 +122,13 @@ verified live in the browser, entirely local (no Freenet, no NWC):
 ## Known stub / unimplemented areas
 
 - `delegate/src/nwc.rs` — no real NWC/Nostr relay connection yet (Phase 3).
-- `delegate/src/freenet_bridge.rs` — no real Freenet client API calls yet;
-  nothing is broadcast to the network, everything above is local-only.
+- `delegate/src/freenet_bridge.rs` — no real Freenet client API calls yet
+  (still `todo!()`); nothing from the delegate is broadcast to the network,
+  everything in "Working end-to-end" above is local-only. We proved the
+  underlying network path works via the `fdev` CLI directly (see above) -
+  the remaining work is wiring `FreenetBridge` to do the same thing
+  programmatically via `freenet_stdlib::client_api::WebApi` instead of
+  shelling out to `fdev`.
 - ECDH-based subscriber key delivery (`crypto::derive_shared_secret` and
   friends) is implemented but not called from anywhere yet — needs the NWC
   payment listener to trigger it (Phase 3).

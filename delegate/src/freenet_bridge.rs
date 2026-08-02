@@ -1,12 +1,21 @@
 //! Bridge to a local Freenet node over its native host protocol (a
-//! WebSocket JSON/binary API exposed by `freenet-core` at a local port).
+//! WebSocket API exposed by `freenet-core` at a local port).
 //!
 //! Responsible for PUT/GET/subscribe against the four Aetheria contracts
 //! (`PublisherProfileContract`, `ContentIndexContract`, `PostDataContract`,
-//! `SubscriberRegistryContract`). Left unimplemented pending a running local
-//! Freenet node to develop against — confirm the exact host protocol port
-//! and message framing against `freenet-stdlib`'s client API once the Rust
-//! toolchain and `freenet` crate are installed locally.
+//! `SubscriberRegistryContract`). Confirmed against a real running local
+//! node (2026-08-02): the WebSocket API lives at `ws://127.0.0.1:7509/`
+//! (root path, not `/contract/command` as originally guessed), default port
+//! 7509. Manually verified end-to-end with the `fdev` CLI: built
+//! `post-data-contract` with `fdev build`, published a real
+//! `EncryptedPostPayload` state with `fdev publish ... contract --state`,
+//! and read it back with `fdev execute get` - byte-for-byte round trip.
+//!
+//! Still `todo!()` here: this struct doesn't yet talk to the node itself.
+//! The real client library is `freenet_stdlib::client_api::WebApi` (connects
+//! over the same websocket, `send(ClientRequest)` / `recv() -> HostResult`)
+//! - swap these stubs for that once the delegate needs to do this
+//! programmatically instead of shelling out to `fdev`.
 
 use anyhow::Result;
 
@@ -18,10 +27,10 @@ pub struct FreenetBridge {
 impl FreenetBridge {
     /// Connect to a Freenet node running on this machine.
     pub async fn connect_local() -> Result<Self> {
-        // TODO(Phase 1/2): replace with `freenet_stdlib::client_api` once
-        // the local node's websocket address is confirmed.
+        // TODO(Phase 3): replace with `freenet_stdlib::client_api::WebApi`
+        // once the delegate actually needs to PUT/GET contract state itself.
         Ok(Self {
-            node_ws_url: "ws://127.0.0.1:50509/contract/command".to_string(),
+            node_ws_url: "ws://127.0.0.1:7509/".to_string(),
         })
     }
 

@@ -4,6 +4,10 @@
 Cargo.lock.bak
 *.pdb
 
+# fdev build output (compiled WASM contract packages - rebuild with
+# `fdev build`, see CLAUDE.md for the CARGO_TARGET_DIR workaround needed)
+contracts/*/build/
+
 # Node / Frontend
 node_modules/
 dist/
