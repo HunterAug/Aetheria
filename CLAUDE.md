@@ -460,6 +460,59 @@ distinguishing by how thoroughly each was actually verified:
   for that reader-side code path once it exists; it's just not called from
   `ipc.rs` yet.
 
+## Optional 2% platform fee (as of 2026-08-02)
+
+Design doc §6.3's "Optional App Split": `handle_subscribe` in `ipc.rs`
+requests a small fee invoice (2%, `PLATFORM_FEE_BASIS_POINTS = 200`) from a
+second, separate `NwcClient` alongside the main subscription payment, paid
+by the reader's already-connected wallet. Best-effort, non-blocking - a
+hiccup collecting the fee never affects whether the subscriber gets
+access (same philosophy as everything else in this file); the IPC response
+carries `platform_fee_synced`/`platform_fee_error` so this is reported
+honestly rather than silently swallowed either way.
+
+- **Off by default.** `main.rs::connect_platform_fee_wallet` only connects
+  this second wallet if `AETHERIA_PLATFORM_FEE_NWC` is set to a real
+  `nostr+walletconnect://...` URI - unset for anyone else building/forking
+  this project, so a fork doesn't silently try to pay a stranger's wallet.
+- **Never commit the real connection string** to this repo, anywhere,
+  including tauri sidecar env vars in `app/src-tauri/src/main.rs` (unlike
+  `AETHERIA_DEV_PASSPHRASE`, which is an intentionally-public dev placeholder,
+  this is a real secret). It's scoped receive-only when generated via
+  `create-app --scopes "make_invoice,lookup_invoice,get_info,get_balance"`
+  (no `pay_invoice`) specifically so a leak can't be used to spend funds -
+  but "can't be drained" isn't the same as "safe to publish," so it stays
+  out of version control regardless. How a real shipped installer gets this
+  value into every user's copy (vs. a dev running it locally via env var)
+  is an open question, not yet solved - flagged here rather than guessed at.
+- The actual receiving wallet for this (as of 2026-08-02) is a self-hosted
+  Alby Hub running in Docker (`ghcr.io/getalby/hub:latest`, container name
+  `alby-hub`, port 8080, named volume `albyhub-data`) on **real Bitcoin
+  mainnet** - not a testnet. It's initialized and unlocked (`setup`/`start
+  --save` already run), but has **zero Lightning channels/liquidity** as of
+  this writing (JIT channels are enabled though, so the first real payment
+  it ever receives would open one automatically, fee deducted from that
+  payment - see the hub's own `jit-channels.md` reference if the
+  `getAlby/hub-skill` skill is installed).
+- **Verified 2026-08-02, zero real money involved**: built and ran the
+  actual `aetheria-delegate` binary with `AETHERIA_PLATFORM_FEE_NWC` pointed
+  at a mock NIP-47 wallet (`delegate/examples/mock_nwc_wallet.rs`, real
+  relay + real NIP-04 encryption, fake Lightning backend - same harness the
+  NWC agent built for the main flow), drove a real `subscribe` IPC call:
+  - Fee wallet ≠ reader wallet (two independent mock wallet processes): fee
+    invoice creation succeeded, but paying it failed (`NotFound - unknown
+    invoice`) - each mock wallet only recognizes invoices *it* created, an
+    artifact of the two-independent-fake-ledgers test harness, not a real
+    Lightning limitation (real bolt11 invoices are payable by any wallet
+    that can route to them). Confirms the important thing: this failure did
+    **not** block the main subscription - `network_synced: true`, a real
+    preimage, full access granted; only `platform_fee_synced: false`.
+  - Fee wallet = reader wallet (same mock wallet playing both roles, same
+    "single identity plays multiple roles" convention already used for the
+    main flow, see `nwc.rs`'s module docs): full success,
+    `platform_fee_synced: true`, `platform_fee_error: null`, main
+    subscription unaffected.
+
 ## Known stub / unimplemented areas
 
 - `FreenetBridge::subscribe` — sends nothing, still `todo!()`

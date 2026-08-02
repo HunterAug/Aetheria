@@ -53,8 +53,38 @@ async fn main() -> Result<()> {
         "Freenet publisher identity ready"
     );
     let nwc = nwc::NwcClient::disconnected();
+    let platform_fee_nwc = connect_platform_fee_wallet().await;
 
-    ipc::serve(IPC_PORT, db, keys, freenet, nwc, identity).await
+    ipc::serve(IPC_PORT, db, keys, freenet, nwc, identity, platform_fee_nwc).await
+}
+
+/// Optional 2% platform fee (design doc §6.3's "Optional App Split"): if
+/// `AETHERIA_PLATFORM_FEE_NWC` is set to a real `nostr+walletconnect://...`
+/// URI, `ipc.rs`'s `handle_subscribe` requests a small fee invoice from this
+/// wallet alongside the main subscription payment, best-effort. Unset by
+/// default - a fork of this app run by someone else shouldn't silently try
+/// to pay a stranger's wallet. **Never hardcode a real connection string
+/// here or anywhere else in this repo** - it's a real secret (scoped
+/// receive-only: make_invoice/lookup_invoice/get_info/get_balance, no
+/// pay_invoice, so even a leaked string can't be used to spend funds, but
+/// it's still not something to commit to git history).
+async fn connect_platform_fee_wallet() -> nwc::NwcClient {
+    let mut client = nwc::NwcClient::disconnected();
+    match std::env::var("AETHERIA_PLATFORM_FEE_NWC") {
+        Ok(uri) if !uri.trim().is_empty() => match client.connect(&uri).await {
+            Ok(()) => {
+                tracing::info!("platform fee wallet connected - 2% subscription split enabled");
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "AETHERIA_PLATFORM_FEE_NWC is set but failed to connect - platform fee split disabled this run"
+                );
+            }
+        },
+        _ => {}
+    }
+    client
 }
 
 /// Platform-appropriate app data directory (e.g. `%APPDATA%\aetheria\aetheria-delegate\data`

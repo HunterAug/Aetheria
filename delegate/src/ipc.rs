@@ -98,6 +98,11 @@ struct Delegate {
     freenet: FreenetBridge,
     nwc: NwcClient,
     identity: PublisherIdentity,
+    /// Optional 2% platform fee wallet (design doc §6.3) - disconnected
+    /// unless `AETHERIA_PLATFORM_FEE_NWC` was set at startup (see
+    /// `main.rs::connect_platform_fee_wallet`). `handle_subscribe` checks
+    /// `is_connected()` before doing anything with it.
+    platform_fee: NwcClient,
 }
 
 pub async fn serve(
@@ -107,6 +112,7 @@ pub async fn serve(
     freenet: FreenetBridge,
     nwc: NwcClient,
     identity: PublisherIdentity,
+    platform_fee: NwcClient,
 ) -> Result<()> {
     let delegate = Arc::new(Mutex::new(Delegate {
         db,
@@ -114,6 +120,7 @@ pub async fn serve(
         freenet,
         nwc,
         identity,
+        platform_fee,
     }));
 
     let addr = format!("127.0.0.1:{port}");
@@ -574,6 +581,34 @@ async fn handle_subscribe(delegate: &Delegate, tier_id: u8) -> Result<serde_json
          grant access"
     );
 
+    // Optional 2% platform fee (design doc §6.3), best-effort: the reader's
+    // subscription is already paid for and verified above, so a hiccup
+    // collecting this small secondary fee must never block or reverse the
+    // access grant that follows - same "local decision is real regardless
+    // of what a network/secondary side-effect does" philosophy as
+    // everywhere else in this file. Skipped entirely if no platform fee
+    // wallet is configured (see `main.rs::connect_platform_fee_wallet`).
+    let (platform_fee_synced, platform_fee_error) = if delegate.platform_fee.is_connected() {
+        const PLATFORM_FEE_BASIS_POINTS: u64 = 200; // 2.00%
+        let fee_amount_msat = amount_msat.saturating_mul(PLATFORM_FEE_BASIS_POINTS) / 10_000;
+        if fee_amount_msat == 0 {
+            (false, Some("tier price too small to produce a nonzero fee".to_string()))
+        } else {
+            match collect_platform_fee(delegate, fee_amount_msat, tier.tier_id).await {
+                Ok(()) => (true, None),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "platform fee collection failed - subscriber access is unaffected"
+                    );
+                    (false, Some(e.to_string()))
+                }
+            }
+        }
+    } else {
+        (false, None)
+    };
+
     // ECDH key delivery (crypto.rs, design doc §4.2).
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let epoch_id = current_epoch_id(now);
@@ -625,7 +660,31 @@ async fn handle_subscribe(delegate: &Delegate, tier_id: u8) -> Result<serde_json
         "preimage": confirmed_preimage,
         "network_synced": registry_synced,
         "network_error": network_error,
+        "platform_fee_synced": platform_fee_synced,
+        "platform_fee_error": platform_fee_error,
     }))
+}
+
+/// Requests a `fee_amount_msat` invoice from the platform fee wallet and
+/// pays it via the reader's own connected wallet (`delegate.nwc` - same
+/// dual-role-one-wallet caveat as the main subscription payment in this
+/// milestone's single-identity architecture, see `nwc.rs`'s module docs).
+/// No settlement re-verification via `lookup_invoice` here, unlike the main
+/// payment above - this is a best-effort side collection, not something
+/// worth gating subscriber access on either way.
+async fn collect_platform_fee(delegate: &Delegate, fee_amount_msat: u64, tier_id: u8) -> Result<()> {
+    let description = format!("Aetheria platform fee: tier {tier_id} subscription");
+    let invoice = delegate
+        .platform_fee
+        .make_invoice(fee_amount_msat, &description)
+        .await
+        .context("requesting platform fee invoice via NWC")?;
+    delegate
+        .nwc
+        .pay_invoice(&invoice.bolt11)
+        .await
+        .context("paying platform fee invoice via NWC")?;
+    Ok(())
 }
 
 fn handle_list_subscribers(delegate: &Delegate) -> Result<serde_json::Value> {
