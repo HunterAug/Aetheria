@@ -153,6 +153,12 @@ fn handle_list_posts(delegate: &Delegate) -> Result<serde_json::Value> {
     let json: Vec<_> = posts
         .into_iter()
         .map(|p| {
+            // `post_contract_id` is `None` for a post whose network publish
+            // failed (or hasn't been retried yet) - see
+            // `handle_publish_post`. That's a legitimate, non-error state:
+            // the post is real and locally saved, just not yet distributed
+            // to the network, so it still shows up here rather than being
+            // hidden or treated as corrupt.
             serde_json::json!({
                 "post_id": hex::encode(p.post_id),
                 "title": p.title,
@@ -160,6 +166,8 @@ fn handle_list_posts(delegate: &Delegate) -> Result<serde_json::Value> {
                 "access_level": p.access_level,
                 "epoch_id": p.epoch_id,
                 "published_at": p.published_at,
+                "network_synced": p.post_contract_id.is_some(),
+                "post_contract_id": p.post_contract_id,
             })
         })
         .collect();
@@ -200,6 +208,8 @@ fn handle_get_post(delegate: &Delegate, post_id_hex: &str) -> Result<serde_json:
         "post_id": post_id_hex,
         "title": row.title,
         "markdown": markdown,
+        "network_synced": row.post_contract_id.is_some(),
+        "post_contract_id": row.post_contract_id,
     }))
 }
 
@@ -265,7 +275,21 @@ async fn handle_publish_post(
         )
     };
 
-    let post_contract_id = contracts::publish_post_to_network(
+    // The local SQLite write above already committed - this post is real
+    // and already in the local feed (`list_posts`/`get_post` will show it)
+    // regardless of what happens next. Freenet is additive on top of that,
+    // per the design philosophy documented in CLAUDE.md and at the top of
+    // this file, and the real gateway network is known to be flaky enough
+    // that even `freenet_bridge.rs`'s client-side retries sometimes come up
+    // empty (see CLAUDE.md's "Working end-to-end" section) - that is
+    // expected, not a bug to propagate as a hard failure. So: don't let a
+    // network-publish error fail the whole IPC response and don't let it
+    // invalidate the local write either. Catch it, log it, and report
+    // honestly which side succeeded so the UI can show something like
+    // "saved locally, not yet synced to the network" instead of a bare
+    // failure - while `list_posts`/`get_post` keep working unconditionally
+    // for the post either way.
+    let (post_contract_id, network_synced, network_error) = match contracts::publish_post_to_network(
         &delegate.freenet,
         &delegate.keys,
         &delegate.identity,
@@ -278,11 +302,27 @@ async fn handle_publish_post(
         network_cipher_text,
         network_nonce,
     )
-    .await?;
+    .await
+    {
+        Ok(contract_id) => {
+            delegate.db.set_post_contract_id(&post_id, &contract_id)?;
+            (Some(contract_id), true, None)
+        }
+        Err(e) => {
+            tracing::warn!(
+                post_id = %hex::encode(post_id),
+                error = %e,
+                "network publish failed after retries; post saved locally only, not yet synced to the network"
+            );
+            (None, false, Some(e.to_string()))
+        }
+    };
 
     Ok(serde_json::json!({
         "post_id": hex::encode(post_id),
         "post_contract_id": post_contract_id,
+        "network_synced": network_synced,
+        "network_error": network_error,
     }))
 }
 

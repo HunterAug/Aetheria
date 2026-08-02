@@ -28,6 +28,13 @@ pub struct PostSummary {
     pub access_level: String,
     pub epoch_id: u32,
     pub published_at: u64,
+    /// `None` until `publish_post_to_network` succeeds for this post (see
+    /// `ipc.rs::handle_publish_post`) - the local SQLite write happens first
+    /// and unconditionally, so a post can legitimately sit here with this
+    /// still unset if the network side failed or hasn't been retried yet.
+    /// Not an error state by itself; callers surface it as "not yet synced"
+    /// rather than treating a `None` row as corrupt or incomplete.
+    pub post_contract_id: Option<String>,
 }
 
 /// Full stored representation of a post, before decryption.
@@ -40,6 +47,8 @@ pub struct PostRow {
     /// Present only for `access_level = "subscriber"` posts.
     pub cipher_text: Option<Vec<u8>>,
     pub nonce: Option<Vec<u8>>,
+    /// See `PostSummary::post_contract_id` - same "not yet synced" meaning.
+    pub post_contract_id: Option<String>,
 }
 
 impl LocalStore {
@@ -56,7 +65,8 @@ impl LocalStore {
                 nonce         BLOB,
                 access_level  TEXT NOT NULL,
                 epoch_id      INTEGER NOT NULL,
-                published_at  INTEGER NOT NULL
+                published_at  INTEGER NOT NULL,
+                post_contract_id TEXT
             );
 
             CREATE TABLE IF NOT EXISTS epoch_keys (
@@ -79,6 +89,19 @@ impl LocalStore {
             );
             "#,
         )?;
+
+        // `CREATE TABLE IF NOT EXISTS` above is a no-op against a `posts`
+        // table that already existed on disk from before this column was
+        // added (e.g. this machine's real dev DB under
+        // `%APPDATA%\aetheria\aetheria-delegate\data\`) - add it defensively
+        // rather than assuming every on-disk DB is fresh.
+        let has_post_contract_id = conn
+            .prepare("SELECT post_contract_id FROM posts LIMIT 1")
+            .is_ok();
+        if !has_post_contract_id {
+            conn.execute("ALTER TABLE posts ADD COLUMN post_contract_id TEXT", [])?;
+        }
+
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -164,7 +187,7 @@ impl LocalStore {
     pub fn list_posts(&self) -> Result<Vec<PostSummary>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT post_id, title, summary, access_level, epoch_id, published_at
+            "SELECT post_id, title, summary, access_level, epoch_id, published_at, post_contract_id
              FROM posts ORDER BY published_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -178,6 +201,7 @@ impl LocalStore {
                 access_level: row.get(3)?,
                 epoch_id: epoch_id as u32,
                 published_at: published_at as u64,
+                post_contract_id: row.get(6)?,
             })
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -189,7 +213,7 @@ impl LocalStore {
             .lock()
             .expect("db mutex poisoned")
             .query_row(
-                "SELECT title, access_level, epoch_id, markdown, cipher_text, nonce
+                "SELECT title, access_level, epoch_id, markdown, cipher_text, nonce, post_contract_id
                  FROM posts WHERE post_id = ?1",
                 params![post_id.as_slice()],
                 |row| {
@@ -201,11 +225,26 @@ impl LocalStore {
                         markdown_plain: row.get(3)?,
                         cipher_text: row.get(4)?,
                         nonce: row.get(5)?,
+                        post_contract_id: row.get(6)?,
                     })
                 },
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    /// Records that `post_id`'s network publish (`PostDataContract` mint +
+    /// `ContentIndexContract` fold, see `contracts::publish_post_to_network`)
+    /// succeeded, so `list_posts`/`get_post` can report it as synced. Never
+    /// called if the network publish failed - the row is simply left with
+    /// `post_contract_id = NULL`, which is the "saved locally, not yet
+    /// synced" state, not an error to clean up.
+    pub fn set_post_contract_id(&self, post_id: &[u8; 16], post_contract_id: &str) -> Result<()> {
+        self.conn.lock().expect("db mutex poisoned").execute(
+            "UPDATE posts SET post_contract_id = ?1 WHERE post_id = ?2",
+            params![post_contract_id, post_id.as_slice()],
+        )?;
+        Ok(())
     }
 
     /// Returns the key for `epoch_id`, generating and storing one if it
