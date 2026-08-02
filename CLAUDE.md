@@ -23,12 +23,11 @@ crypto flows, and the 16-week roadmap).
 
 ## Environment notes (this machine)
 
-- **No Rust toolchain installed** (no `cargo`/`rustup` as of project start).
-  Contract and delegate code is written to be idiomatic against
-  `freenet-stdlib` 0.8 / `ciborium` 0.2 based on the Freenet tutorial, but has
-  never been compiled — expect to fix up API drift (exact `ContractError`
-  variants, `ValidateResult`/`UpdateModification` constructors, etc.) the
-  first time `cargo check` runs.
+- Rust toolchain (`rustup`/`cargo`) and the `wasm32-unknown-unknown` target
+  are installed. `cargo check` and `cargo build --target wasm32-unknown-unknown`
+  both pass warning-free in `contracts/` as of the commits below. `cargo` may
+  not be on `PATH` in every shell — if `command not found`, add
+  `C:\Users\WebDev\.cargo\bin` to `PATH` for that session.
 - **No GitHub CLI (`gh`) installed.** Repo is pushed to GitHub by adding a
   remote manually (`git remote add origin <url>`) rather than `gh repo create`.
 - **Port 3000 is occupied by something else on this machine** — the Vite
@@ -48,6 +47,16 @@ crypto flows, and the 16-week roadmap).
   delegates, don't improvise a different KDF or nonce scheme.
 - Unimplemented subsystems are marked with `todo!()` plus a `// TODO(PhaseN):`
   comment citing the doc section, not silently stubbed with fake success.
+- Every contract crate under `contracts/*-contract/` needs **both**:
+  `freenet-stdlib = { version = "0.8", features = ["contract"] }` (unlocks
+  `freenet_stdlib::memory::wasm_interface`, used by the `#[contract]` macro
+  expansion) **and** its own `[features] default = ["freenet-main-contract"]`
+  / `freenet-main-contract = []` (the macro's `#[no_mangle] extern "C"` WASM
+  exports are gated on this feature name, but the `cfg` check resolves
+  against the crate the macro expands into — not `freenet-stdlib` — so it
+  has to be declared here too). Without both, `cargo check` "succeeds" but
+  silently drops the WASM exports, and every helper the trait impl calls
+  looks like unused dead code. Copy this pattern for any new contract crate.
 
 ## Known stub / unimplemented areas (as of initial scaffold)
 
