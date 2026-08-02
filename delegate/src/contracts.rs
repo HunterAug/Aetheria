@@ -155,9 +155,12 @@ pub async fn ensure_publisher_identity(
             let code = load_code(PUBLISHER_PROFILE_CONTRACT_WASM)?;
             let mut profile = PublisherProfile {
                 author_pubkey,
-                // TODO(later): real publication settings once the UI exposes
-                // them - nothing populates title/description/tiers yet.
-                title: "Untitled Publication".to_string(),
+                // Blank on purpose: a fresh identity has no display name yet -
+                // the UI prompts for one (see App.tsx's first-run check on
+                // `display_name.trim() === ""`) rather than this publishing a
+                // placeholder like "Untitled Publication" that a new user
+                // might not think to go change.
+                title: String::new(),
                 description: String::new(),
                 avatar_freenet_key: None,
                 subscription_tiers: Vec::new(),

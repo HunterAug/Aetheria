@@ -354,11 +354,13 @@ fn handle_get_profile(delegate: &Delegate) -> Result<serde_json::Value> {
             },
             "avatar_freenet_key": avatar_freenet_key,
         })),
-        // No local row yet (fresh install, Profile tab never saved) - mirror
-        // the placeholder `ensure_publisher_identity` publishes on first run
-        // rather than showing something inconsistent with the network.
+        // No local row yet (fresh install, Settings never saved) - blank on
+        // purpose, matching the blank title `ensure_publisher_identity`
+        // publishes on first run. The UI treats an empty `display_name` as
+        // "not configured yet" and prompts for one rather than silently
+        // shipping with a placeholder nobody remembers to change.
         None => Ok(serde_json::json!({
-            "display_name": "Untitled Publication",
+            "display_name": "",
             "bio": "",
             "avatar_data_url": null,
             "avatar_freenet_key": avatar_freenet_key,
