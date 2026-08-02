@@ -22,6 +22,21 @@ export interface PostDetail {
   markdown: string;
 }
 
+export interface Profile {
+  display_name: string;
+  bio: string;
+  /// A `data:<mime>;base64,...` URL, or `null` if no avatar has been set.
+  avatar_data_url: string | null;
+  /// Encoded contract id of the avatar's `PostDataContract` instance on
+  /// Freenet, or `null` if it hasn't reached the network yet.
+  avatar_freenet_key: string | null;
+}
+
+export interface UpdateProfileResult extends Profile {
+  network_synced: boolean;
+  network_error: string | null;
+}
+
 interface PendingEntry {
   resolve: (value: unknown) => void;
   reject: (reason: unknown) => void;
@@ -94,6 +109,19 @@ class DelegateClient {
     access: AccessLevel;
   }): Promise<{ post_id: string }> {
     return this.call("publish_post", input);
+  }
+
+  getProfile(): Promise<Profile> {
+    return this.call("get_profile");
+  }
+
+  updateProfile(input: {
+    display_name: string;
+    bio: string;
+    /// Omit (or pass `null`) to leave the currently-stored avatar unchanged.
+    avatar_data_url?: string | null;
+  }): Promise<UpdateProfileResult> {
+    return this.call("update_profile", input);
   }
 }
 

@@ -103,7 +103,6 @@ fn contract_key_from_registration(instance_id: [u8; 32], code_hash: [u8; 32]) ->
 /// every publisher needs before they can publish a single post.
 pub struct PublisherIdentity {
     pub content_index_key: ContractKey,
-    #[allow(dead_code)]
     pub profile_key: ContractKey,
     post_data_code: Arc<ContractCode<'static>>,
 }
@@ -279,4 +278,124 @@ pub async fn publish_post_to_network(
         .context("updating ContentIndexContract")?;
 
     Ok(post_contract_id)
+}
+
+/// Derives a stable 16-byte identifier for this publisher's avatar
+/// `PostDataContract` instance from their pubkey (not a random post_id, the
+/// way real posts get one) so repeated avatar edits update the *same*
+/// contract instance rather than minting a fresh one every time - that's
+/// what lets `avatar_freenet_key` keep pointing at the right place across
+/// profile edits.
+fn avatar_post_id(author_pubkey: &[u8; 32]) -> [u8; 16] {
+    author_pubkey[0..16].try_into().expect("pubkey is 32 bytes, slice is 16")
+}
+
+/// Publishes (first call) or updates (every later call) this publisher's
+/// avatar image through the same already-compiled `PostDataContract` code
+/// used for post bodies, rather than inventing a new contract type - its
+/// schema (`EncryptedPostPayload`) is a generic blob container, and
+/// `post_id` doesn't have to literally be a post (see the module docs and
+/// CLAUDE.md for the reasoning). Returns the (possibly new) contract's
+/// encoded id, storing/reusing its registration under db role `"avatar"`
+/// the same way `content_index`/`publisher_profile` do, so a restart finds
+/// the same instance instead of re-publishing.
+pub async fn publish_avatar_to_network(
+    freenet: &FreenetBridge,
+    db: &LocalStore,
+    identity: &PublisherIdentity,
+    author_pubkey: [u8; 32],
+    avatar_bytes: Vec<u8>,
+) -> Result<String> {
+    let avatar_id = avatar_post_id(&author_pubkey);
+    let payload = EncryptedPostPayload {
+        post_id: avatar_id,
+        cipher_text: avatar_bytes,
+        // Avatars are public by definition (shown on every post) - same
+        // all-zero-nonce "plaintext" convention public posts use (see
+        // `publish_post_to_network` above and `ipc.rs`).
+        nonce: [0u8; 12],
+        auth_tag: [0u8; 16],
+        attachments: Vec::new(),
+    };
+    let mut buf = Vec::new();
+    ciborium::into_writer(&payload, &mut buf)?;
+
+    match db.get_contract_registration("avatar")? {
+        Some((instance_id, code_hash)) => {
+            let key = contract_key_from_registration(instance_id, code_hash);
+            freenet
+                .update_state(key, buf)
+                .await
+                .context("updating avatar PostDataContract")?;
+            Ok(key.encoded_contract_id())
+        }
+        None => {
+            let params = Parameters::from(avatar_id.to_vec());
+            let key = freenet
+                .put_new(identity.post_data_code.clone(), params, buf)
+                .await
+                .context("publishing avatar PostDataContract")?;
+            db.set_contract_registration("avatar", key.id().as_bytes(), key.code_hash().as_ref())?;
+            Ok(key.encoded_contract_id())
+        }
+    }
+}
+
+/// Best-effort, network-free lookup of a previously-published avatar
+/// contract's encoded id (or `None` if an avatar has never been published) -
+/// used when a profile save doesn't touch the avatar this call, so the
+/// existing key can still be threaded through to `publish_profile_to_network`
+/// instead of being silently dropped.
+pub fn known_avatar_key(db: &LocalStore) -> Result<Option<String>> {
+    Ok(db
+        .get_contract_registration("avatar")?
+        .map(|(instance_id, code_hash)| {
+            contract_key_from_registration(instance_id, code_hash).encoded_contract_id()
+        }))
+}
+
+/// Pushes an updated, freshly-signed `PublisherProfile` to the network,
+/// overwriting `title`/`description`/`avatar_freenet_key`/`updated_at` while
+/// preserving whatever `subscription_tiers` the currently-stored state has
+/// (nothing sets tiers yet - see `ensure_publisher_identity`'s TODO - but
+/// fetching-then-resending mirrors the same pattern `publish_post_to_network`
+/// uses for `ContentIndexContract` rather than silently clobbering a field
+/// this call doesn't know about).
+pub async fn publish_profile_to_network(
+    freenet: &FreenetBridge,
+    keys: &DelegateKeys,
+    identity: &PublisherIdentity,
+    title: &str,
+    description: &str,
+    avatar_freenet_key: Option<String>,
+) -> Result<()> {
+    let current = freenet
+        .get_state(*identity.profile_key.id())
+        .await
+        .context("fetching current PublisherProfileContract state")?;
+    let subscription_tiers = current
+        .as_deref()
+        .and_then(|bytes| ciborium::from_reader::<PublisherProfile, _>(bytes).ok())
+        .map(|p| p.subscription_tiers)
+        .unwrap_or_default();
+
+    let mut profile = PublisherProfile {
+        author_pubkey: keys.master_signing_verifying_bytes(),
+        title: title.to_string(),
+        description: description.to_string(),
+        avatar_freenet_key,
+        subscription_tiers,
+        content_index_contract_id: identity.content_index_key.encoded_contract_id(),
+        updated_at: now_unix(),
+        signature: [0u8; 64],
+    };
+    let signature = keys.master_signing.sign(&profile.signable_bytes());
+    profile.signature = signature.to_bytes();
+
+    let mut buf = Vec::new();
+    ciborium::into_writer(&profile, &mut buf)?;
+    freenet
+        .update_state(identity.profile_key, buf)
+        .await
+        .context("updating PublisherProfileContract")
 }

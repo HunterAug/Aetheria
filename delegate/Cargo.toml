@@ -21,6 +21,9 @@ futures-util = "0.3"
 freenet-stdlib = { version = "0.8", features = ["net"] }
 ciborium = "0.2"
 serde-big-array = "0.5"
+# Data-URL codec for the profile avatar image over IPC (`ipc.rs`'s
+# encode_data_url/decode_data_url).
+base64 = "0.22"
 
 rusqlite = { version = "0.32", features = ["bundled"] }
 

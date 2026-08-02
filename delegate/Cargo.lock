@@ -45,6 +45,7 @@ dependencies = [
  "aetheria-types",
  "anyhow",
  "argon2",
+ "base64",
  "ciborium",
  "directories",
  "ed25519-dalek",

@@ -37,6 +37,22 @@ pub struct PostSummary {
     pub post_contract_id: Option<String>,
 }
 
+/// This delegate's own publication profile as cached locally for fast
+/// rendering. Mirrors the pieces of the network's `PublisherProfile`
+/// (`contracts.rs`) that the UI reads directly - the signed/pubkey/tier
+/// fields stay in `contracts.rs`/`keys.rs`, not duplicated here.
+pub struct ProfileRow {
+    pub display_name: String,
+    pub bio: String,
+    /// Raw image bytes, stored locally for fast rendering regardless of
+    /// whether the best-effort network publish (`contracts::publish_avatar_to_network`)
+    /// has succeeded yet.
+    pub avatar_bytes: Option<Vec<u8>>,
+    pub avatar_mime: Option<String>,
+    #[allow(dead_code)]
+    pub updated_at: u64,
+}
+
 /// Full stored representation of a post, before decryption.
 pub struct PostRow {
     pub title: String,
@@ -87,8 +103,21 @@ impl LocalStore {
                 instance_id  BLOB NOT NULL,
                 code_hash    BLOB NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS profile (
+                id            INTEGER PRIMARY KEY CHECK (id = 0),
+                display_name  TEXT NOT NULL,
+                bio           TEXT NOT NULL,
+                avatar_bytes  BLOB,
+                avatar_mime   TEXT,
+                updated_at    INTEGER NOT NULL
+            );
             "#,
         )?;
+        // `profile` is a brand-new table (no existing on-disk DB predates
+        // it), so plain `CREATE TABLE IF NOT EXISTS` above is enough - unlike
+        // `post_contract_id` below, there's no pre-existing schema shape to
+        // guard against.
 
         // `CREATE TABLE IF NOT EXISTS` above is a no-op against a `posts`
         // table that already existed on disk from before this column was
@@ -266,6 +295,56 @@ impl LocalStore {
         Ok(key)
     }
 
+    /// Reads this delegate's locally-cached profile fields, or `None` if
+    /// `set_profile` has never been called (fresh install, before the user
+    /// has visited the Profile tab and saved anything) - callers fall back
+    /// to the same placeholder `ensure_publisher_identity` publishes on
+    /// first run (`"Untitled Publication"`, empty bio, no avatar).
+    pub fn get_profile(&self) -> Result<Option<ProfileRow>> {
+        self.conn
+            .lock()
+            .expect("db mutex poisoned")
+            .query_row(
+                "SELECT display_name, bio, avatar_bytes, avatar_mime, updated_at FROM profile WHERE id = 0",
+                [],
+                |row| {
+                    let updated_at: i64 = row.get(4)?;
+                    Ok(ProfileRow {
+                        display_name: row.get(0)?,
+                        bio: row.get(1)?,
+                        avatar_bytes: row.get(2)?,
+                        avatar_mime: row.get(3)?,
+                        updated_at: updated_at as u64,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Upserts the single-row local profile cache (singleton row `id = 0`).
+    pub fn set_profile(
+        &self,
+        display_name: &str,
+        bio: &str,
+        avatar_bytes: Option<&[u8]>,
+        avatar_mime: Option<&str>,
+        updated_at: u64,
+    ) -> Result<()> {
+        self.conn.lock().expect("db mutex poisoned").execute(
+            "INSERT INTO profile (id, display_name, bio, avatar_bytes, avatar_mime, updated_at)
+             VALUES (0, ?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(id) DO UPDATE SET
+                display_name = excluded.display_name,
+                bio = excluded.bio,
+                avatar_bytes = excluded.avatar_bytes,
+                avatar_mime = excluded.avatar_mime,
+                updated_at = excluded.updated_at",
+            params![display_name, bio, avatar_bytes, avatar_mime, updated_at as i64],
+        )?;
+        Ok(())
+    }
+
     pub fn get_epoch_key(&self, epoch_id: u32) -> Result<Option<[u8; 32]>> {
         self.conn
             .lock()
@@ -285,5 +364,74 @@ impl LocalStore {
                     .map_err(|_| anyhow::anyhow!("corrupt epoch key length"))
             })
             .transpose()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open_temp() -> (LocalStore, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("aetheria-dbtest-{}", uuid_like()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.sqlite");
+        (LocalStore::open(&path).unwrap(), dir)
+    }
+
+    // Not a real UUID - just enough entropy that parallel test threads don't
+    // collide on the same temp dir (matches the pattern `keys.rs`'s tests use
+    // with `std::process::id()`, extended with an atomic counter since
+    // several tests in this module open a temp DB within the same process).
+    fn uuid_like() -> String {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        format!(
+            "{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
+    #[test]
+    fn get_profile_is_none_before_any_save() {
+        let (db, dir) = open_temp();
+        assert!(db.get_profile().unwrap().is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn set_profile_then_get_profile_round_trips() {
+        let (db, dir) = open_temp();
+        db.set_profile(
+            "Hunter Lawson",
+            "Independent science writer",
+            Some(b"fake-png-bytes"),
+            Some("image/png"),
+            1_700_000_000,
+        )
+        .unwrap();
+
+        let row = db.get_profile().unwrap().expect("profile should exist");
+        assert_eq!(row.display_name, "Hunter Lawson");
+        assert_eq!(row.bio, "Independent science writer");
+        assert_eq!(row.avatar_bytes.as_deref(), Some(b"fake-png-bytes".as_slice()));
+        assert_eq!(row.avatar_mime.as_deref(), Some("image/png"));
+        assert_eq!(row.updated_at, 1_700_000_000);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn set_profile_upserts_the_singleton_row_not_a_new_one() {
+        let (db, dir) = open_temp();
+        db.set_profile("First Name", "first bio", None, None, 1).unwrap();
+        db.set_profile("Second Name", "second bio", None, None, 2).unwrap();
+
+        let row = db.get_profile().unwrap().expect("profile should exist");
+        assert_eq!(row.display_name, "Second Name");
+        assert_eq!(row.bio, "second bio");
+        assert_eq!(row.updated_at, 2);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

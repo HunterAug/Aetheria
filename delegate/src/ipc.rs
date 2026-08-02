@@ -16,7 +16,8 @@ use crate::{
     keys::DelegateKeys,
     nwc::NwcClient,
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
+use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -39,6 +40,15 @@ enum Request {
         markdown: String,
         /// "public" or "subscriber".
         access: String,
+    },
+    GetProfile,
+    UpdateProfile {
+        display_name: String,
+        bio: String,
+        /// A `data:<mime>;base64,<payload>` URL, or `None`/omitted to leave
+        /// the avatar unchanged from whatever's already stored.
+        #[serde(default)]
+        avatar_data_url: Option<String>,
     },
 }
 
@@ -131,6 +141,12 @@ async fn handle_message(delegate: &Arc<Mutex<Delegate>>, text: &str) -> String {
             markdown,
             access,
         } => handle_publish_post(&d, &title, &summary, &markdown, &access).await,
+        Request::GetProfile => handle_get_profile(&d),
+        Request::UpdateProfile {
+            display_name,
+            bio,
+            avatar_data_url,
+        } => handle_update_profile(&d, &display_name, &bio, avatar_data_url.as_deref()).await,
     };
 
     let response = match outcome {
@@ -324,6 +340,151 @@ async fn handle_publish_post(
         "network_synced": network_synced,
         "network_error": network_error,
     }))
+}
+
+fn handle_get_profile(delegate: &Delegate) -> Result<serde_json::Value> {
+    let avatar_freenet_key = contracts::known_avatar_key(&delegate.db)?;
+    match delegate.db.get_profile()? {
+        Some(p) => Ok(serde_json::json!({
+            "display_name": p.display_name,
+            "bio": p.bio,
+            "avatar_data_url": match (&p.avatar_bytes, &p.avatar_mime) {
+                (Some(bytes), Some(mime)) => Some(encode_data_url(mime, bytes)),
+                _ => None,
+            },
+            "avatar_freenet_key": avatar_freenet_key,
+        })),
+        // No local row yet (fresh install, Profile tab never saved) - mirror
+        // the placeholder `ensure_publisher_identity` publishes on first run
+        // rather than showing something inconsistent with the network.
+        None => Ok(serde_json::json!({
+            "display_name": "Untitled Publication",
+            "bio": "",
+            "avatar_data_url": null,
+            "avatar_freenet_key": avatar_freenet_key,
+        })),
+    }
+}
+
+async fn handle_update_profile(
+    delegate: &Delegate,
+    display_name: &str,
+    bio: &str,
+    avatar_data_url: Option<&str>,
+) -> Result<serde_json::Value> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+
+    // Resolve this call's avatar bytes/mime/network-key: either a fresh
+    // upload (published/updated on the network right away, best-effort), or
+    // - if the user didn't touch the avatar this save - whatever's already
+    // cached locally and already registered on the network.
+    let mut network_error: Option<String> = None;
+    let (avatar_bytes, avatar_mime, avatar_freenet_key): (
+        Option<Vec<u8>>,
+        Option<String>,
+        Option<String>,
+    ) = if let Some(data_url) = avatar_data_url {
+        let (mime, bytes) = decode_data_url(data_url)?;
+        let key = match contracts::publish_avatar_to_network(
+            &delegate.freenet,
+            &delegate.db,
+            &delegate.identity,
+            delegate.keys.master_signing_verifying_bytes(),
+            bytes.clone(),
+        )
+        .await
+        {
+            Ok(key) => Some(key),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "avatar network publish failed after retries; avatar saved locally only, not yet synced to the network"
+                );
+                network_error = Some(e.to_string());
+                contracts::known_avatar_key(&delegate.db)?
+            }
+        };
+        (Some(bytes), Some(mime), key)
+    } else {
+        let existing = delegate.db.get_profile()?;
+        let key = contracts::known_avatar_key(&delegate.db)?;
+        match existing {
+            Some(p) => (p.avatar_bytes, p.avatar_mime, key),
+            None => (None, None, key),
+        }
+    };
+
+    // Local write commits unconditionally - same "network is additive, never
+    // blocks the local save" philosophy as `handle_publish_post` above: a
+    // hiccup on the flaky real gateway network must not lose the user's edits.
+    delegate.db.set_profile(
+        display_name,
+        bio,
+        avatar_bytes.as_deref(),
+        avatar_mime.as_deref(),
+        now,
+    )?;
+
+    let profile_synced = match contracts::publish_profile_to_network(
+        &delegate.freenet,
+        &delegate.keys,
+        &delegate.identity,
+        display_name,
+        bio,
+        avatar_freenet_key.clone(),
+    )
+    .await
+    {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "profile network publish failed after retries; changes saved locally only, not yet synced to the network"
+            );
+            network_error.get_or_insert(e.to_string());
+            false
+        }
+    };
+
+    Ok(serde_json::json!({
+        "display_name": display_name,
+        "bio": bio,
+        "avatar_data_url": match (&avatar_bytes, &avatar_mime) {
+            (Some(bytes), Some(mime)) => Some(encode_data_url(mime, bytes)),
+            _ => None,
+        },
+        "avatar_freenet_key": avatar_freenet_key,
+        "network_synced": profile_synced,
+        "network_error": network_error,
+    }))
+}
+
+/// Minimal data-URL codec (`data:<mime>;base64,<payload>`) for the profile
+/// avatar image over IPC - the UI reads/writes a `<input type="file">` as a
+/// data URL, so this avoids inventing a second wire representation just for
+/// this one field.
+fn decode_data_url(data_url: &str) -> Result<(String, Vec<u8>)> {
+    let rest = data_url
+        .strip_prefix("data:")
+        .ok_or_else(|| anyhow::anyhow!("avatar_data_url must start with \"data:\""))?;
+    let (meta, payload) = rest
+        .split_once(',')
+        .ok_or_else(|| anyhow::anyhow!("avatar_data_url missing ',' separator"))?;
+    let mime = meta
+        .strip_suffix(";base64")
+        .ok_or_else(|| anyhow::anyhow!("avatar_data_url must be base64-encoded"))?
+        .to_string();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .context("decoding avatar image base64")?;
+    Ok((mime, bytes))
+}
+
+fn encode_data_url(mime: &str, bytes: &[u8]) -> String {
+    format!(
+        "data:{mime};base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    )
 }
 
 /// Bucket the current time into a coarse ~30-day "billing epoch".

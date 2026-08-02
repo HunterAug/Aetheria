@@ -1,7 +1,12 @@
 import { useEffect, useState } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { delegate, type PostDetail, type PostSummary } from "../lib/delegate";
+import {
+  delegate,
+  type PostDetail,
+  type PostSummary,
+  type Profile,
+} from "../lib/delegate";
 
 const markdownComponents: Components = {
   h1: ({ children }) => (
@@ -118,12 +123,17 @@ function relativeTime(unixSeconds: number): string {
   return `${Math.max(1, Math.floor(value))}${suffix}`;
 }
 
-function initial(title: string): string {
-  return title.trim().charAt(0).toUpperCase() || "A";
+function initial(name: string): string {
+  return name.trim().charAt(0).toUpperCase() || "A";
 }
 
-export default function ReaderFeed() {
+export default function ReaderFeed({
+  onOpenProfile,
+}: {
+  onOpenProfile: () => void;
+}) {
   const [posts, setPosts] = useState<PostSummary[] | null>(null);
+  const [profile, setProfile] = useState<Profile | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<PostDetail | null>(null);
   const [opening, setOpening] = useState<string | null>(null);
@@ -139,7 +149,16 @@ export default function ReaderFeed() {
 
   useEffect(() => {
     refresh();
+    // The profile applies to every post (one publisher per delegate for
+    // now) - fetch it once rather than per-card. A failure here just means
+    // the feed falls back to the pre-profile initial-circle rendering.
+    delegate
+      .getProfile()
+      .then(setProfile)
+      .catch(() => {});
   }, []);
+
+  const authorName = profile?.display_name?.trim() || "Untitled Publication";
 
   async function open(postId: string) {
     setOpening(postId);
@@ -161,6 +180,25 @@ export default function ReaderFeed() {
           className="text-sm text-neutral-500 hover:text-neutral-200 mb-5"
         >
           ← Back to feed
+        </button>
+        <button
+          onClick={onOpenProfile}
+          className="flex items-center gap-2 mb-3 group"
+        >
+          {profile?.avatar_data_url ? (
+            <img
+              src={profile.avatar_data_url}
+              alt=""
+              className="w-7 h-7 rounded-full object-cover"
+            />
+          ) : (
+            <div className="w-7 h-7 rounded-full bg-aetheria-gradient flex items-center justify-center text-xs font-semibold text-white">
+              {initial(authorName)}
+            </div>
+          )}
+          <span className="text-sm font-semibold text-neutral-300 group-hover:underline">
+            {authorName}
+          </span>
         </button>
         <h2 className="text-2xl font-bold text-neutral-100 mb-4">
           {selected.title}
@@ -201,20 +239,36 @@ export default function ReaderFeed() {
 
       <ul className="divide-y divide-ink-800">
         {posts?.map((post) => (
-          <li key={post.post_id}>
-            <button
-              onClick={() => open(post.post_id)}
-              disabled={opening === post.post_id}
-              className="w-full text-left px-6 py-4 hover:bg-ink-900/60 transition-colors flex gap-3"
-            >
-              <div className="w-9 h-9 rounded-full bg-aetheria-gradient flex items-center justify-center text-sm font-semibold text-white shrink-0">
-                {initial(post.title)}
-              </div>
+          <li
+            key={post.post_id}
+            className="hover:bg-ink-900/60 transition-colors"
+          >
+            <div className="px-6 py-4 flex gap-3">
+              <button
+                onClick={onOpenProfile}
+                className="shrink-0"
+                title={`View ${authorName}'s profile`}
+              >
+                {profile?.avatar_data_url ? (
+                  <img
+                    src={profile.avatar_data_url}
+                    alt=""
+                    className="w-9 h-9 rounded-full object-cover"
+                  />
+                ) : (
+                  <div className="w-9 h-9 rounded-full bg-aetheria-gradient flex items-center justify-center text-sm font-semibold text-white">
+                    {initial(authorName)}
+                  </div>
+                )}
+              </button>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2 text-sm">
-                  <span className="font-semibold text-neutral-100">
-                    {post.title}
-                  </span>
+                  <button
+                    onClick={onOpenProfile}
+                    className="font-semibold text-neutral-100 hover:underline"
+                  >
+                    {authorName}
+                  </button>
                   <span className="text-neutral-500">
                     {relativeTime(post.published_at)}
                   </span>
@@ -227,11 +281,20 @@ export default function ReaderFeed() {
                     <span className="text-xs text-neutral-500">opening…</span>
                   )}
                 </div>
-                <p className="text-sm text-neutral-400 mt-0.5 truncate">
-                  {post.summary}
-                </p>
+                <button
+                  onClick={() => open(post.post_id)}
+                  disabled={opening === post.post_id}
+                  className="block w-full text-left"
+                >
+                  <p className="text-sm font-medium text-neutral-200 mt-0.5">
+                    {post.title}
+                  </p>
+                  <p className="text-sm text-neutral-400 mt-0.5 truncate">
+                    {post.summary}
+                  </p>
+                </button>
               </div>
-            </button>
+            </div>
           </li>
         ))}
       </ul>

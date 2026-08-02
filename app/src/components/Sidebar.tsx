@@ -1,9 +1,10 @@
-import { EditIcon, HomeIcon, InfoIcon, PlusIcon, UsersIcon } from "./icons";
+import { EditIcon, HomeIcon, InfoIcon, PlusIcon, UserIcon, UsersIcon } from "./icons";
 import type { Tab } from "../App";
 
 const NAV: { id: Tab; label: string; icon: (p: { className?: string }) => JSX.Element }[] = [
   { id: "feed", label: "Home", icon: HomeIcon },
   { id: "editor", label: "Draft", icon: EditIcon },
+  { id: "profile", label: "Profile", icon: UserIcon },
   { id: "subscribers", label: "Subscribers", icon: UsersIcon },
   { id: "about", label: "About", icon: InfoIcon },
 ];
