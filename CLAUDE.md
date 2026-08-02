@@ -36,6 +36,14 @@ crypto flows, and the 16-week roadmap).
 - Freenet node websocket host address in `delegate/src/freenet_bridge.rs`
   (`ws://127.0.0.1:50509/...`) is a placeholder — confirm the real local-node
   address once a Freenet node is actually running here.
+- `.claude/launch.json` defines the `aetheria-frontend` preview server
+  (`npm run dev --prefix app` on port 5173) for the `preview_start` tool.
+- The delegate's local data (SQLite cache + identity key) lives in the
+  platform app-data dir via `directories::ProjectDirs` — on this machine
+  that's `%APPDATA%\aetheria\aetheria-delegate\data\`. It is **not** relative
+  to wherever the binary happens to be launched from (see the git history
+  around 2026-08-02 for why that distinction mattered — a CWD-relative path
+  silently forked the cache across multiple stray folders).
 
 ## Conventions
 
@@ -58,11 +66,31 @@ crypto flows, and the 16-week roadmap).
   silently drops the WASM exports, and every helper the trait impl calls
   looks like unused dead code. Copy this pattern for any new contract crate.
 
-## Known stub / unimplemented areas (as of initial scaffold)
+## Working end-to-end (as of 2026-08-02)
+
+The publisher's own publish → encrypt → feed → decrypt loop works for real,
+verified live in the browser, entirely local (no Freenet, no NWC):
+
+- `delegate/src/ipc.rs` implements a JSON request/response protocol over the
+  loopback WebSocket: `list_posts`, `get_post`, `publish_post`. See that
+  file's `Request` enum for the exact shape.
+- `app/src/lib/delegate.ts` is the typed client; `Editor.tsx` and
+  `ReaderFeed.tsx` use it instead of rendering placeholders.
+- Public posts are stored as plaintext in SQLite; subscriber-only posts are
+  AES-256-GCM encrypted under a per-epoch key (`current_epoch_id()` in
+  `ipc.rs` currently buckets by ~30-day windows, not real calendar months —
+  that's a known simplification, see TODO there).
+- Since there's only ever one identity (the publisher = the reader in this
+  milestone), decryption always succeeds locally — this does **not** yet
+  test the actual ECDH subscriber key-delivery path.
+
+## Known stub / unimplemented areas
 
 - `delegate/src/nwc.rs` — no real NWC/Nostr relay connection yet (Phase 3).
-- `delegate/src/freenet_bridge.rs` — no real Freenet client API calls yet.
-- `delegate/src/ipc.rs` — WebSocket server accepts connections but has no
-  real message routing/protocol yet.
+- `delegate/src/freenet_bridge.rs` — no real Freenet client API calls yet;
+  nothing is broadcast to the network, everything above is local-only.
+- ECDH-based subscriber key delivery (`crypto::derive_shared_secret` and
+  friends) is implemented but not called from anywhere yet — needs the NWC
+  payment listener to trigger it (Phase 3).
 - Proof-of-work spam mitigation (design doc §7) and the pinning daemon
   (§7, §8 Phase 4) are not started.
