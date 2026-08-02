@@ -1,9 +1,9 @@
 export default function About() {
   return (
-    <div className="px-6 py-5">
+    <div className="px-6 py-5 max-w-2xl mx-auto">
       <h2 className="text-xl font-semibold text-neutral-100 mb-6">About</h2>
 
-      <div className="max-w-2xl space-y-5 text-[15px] leading-relaxed text-neutral-300">
+      <div className="space-y-5 text-[15px] leading-relaxed text-neutral-300">
         <p>
           Science relies on immutable, verifiable data. But right now, the
           global scientific record is hosted on centralized servers

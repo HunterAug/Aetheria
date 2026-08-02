@@ -1,6 +1,6 @@
 export default function SubscriberPortal() {
   return (
-    <div className="px-6 py-5">
+    <div className="px-6 py-5 max-w-2xl mx-auto">
       <h2 className="text-xl font-semibold text-neutral-100 mb-2">
         Subscribers
       </h2>

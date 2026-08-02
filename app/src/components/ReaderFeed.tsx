@@ -155,7 +155,7 @@ export default function ReaderFeed() {
 
   if (selected) {
     return (
-      <div className="px-6 py-5 max-w-2xl">
+      <div className="px-6 py-5 max-w-2xl mx-auto">
         <button
           onClick={() => setSelected(null)}
           className="text-sm text-neutral-500 hover:text-neutral-200 mb-5"
@@ -175,7 +175,7 @@ export default function ReaderFeed() {
   }
 
   return (
-    <div>
+    <div className="max-w-2xl mx-auto">
       <div className="flex items-center justify-between px-6 py-4 border-b border-ink-800">
         <h2 className="text-base font-semibold text-neutral-100">
           For you

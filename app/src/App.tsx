@@ -12,19 +12,17 @@ export default function App() {
   const [tab, setTab] = useState<Tab>("feed");
 
   return (
-    <div className="min-h-screen bg-ink-950 text-neutral-200 flex justify-center">
-      <div className="flex w-full max-w-6xl">
-        <Sidebar tab={tab} onChange={setTab} />
+    <div className="min-h-screen bg-ink-950 text-neutral-200 flex">
+      <Sidebar tab={tab} onChange={setTab} />
 
-        <main className="flex-1 min-w-0 border-x border-ink-800">
-          {tab === "editor" && <Editor />}
-          {tab === "feed" && <ReaderFeed />}
-          {tab === "subscribers" && <SubscriberPortal />}
-          {tab === "about" && <About />}
-        </main>
+      <main className="flex-1 min-w-0 border-x border-ink-800">
+        {tab === "editor" && <Editor />}
+        {tab === "feed" && <ReaderFeed />}
+        {tab === "subscribers" && <SubscriberPortal />}
+        {tab === "about" && <About />}
+      </main>
 
-        <RightRail />
-      </div>
+      <RightRail />
     </div>
   );
 }

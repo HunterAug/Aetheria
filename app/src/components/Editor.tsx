@@ -41,7 +41,7 @@ export default function Editor() {
   const canPublish = title.trim() !== "" && markdown.trim() !== "";
 
   return (
-    <div className="px-6 py-5 max-w-2xl">
+    <div className="px-6 py-5 max-w-2xl mx-auto">
       <h2 className="text-xl font-semibold text-neutral-100 mb-1">Draft</h2>
       <p className="text-sm text-neutral-500 mb-5">
         Publishes to your local Delegate — subscriber posts are AES-256-GCM
