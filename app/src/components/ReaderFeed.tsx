@@ -1,5 +1,101 @@
 import { useEffect, useState } from "react";
+import ReactMarkdown, { type Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { delegate, type PostDetail, type PostSummary } from "../lib/delegate";
+
+const markdownComponents: Components = {
+  h1: ({ children }) => (
+    <h1 className="text-2xl font-bold text-neutral-100 mt-8 mb-3 first:mt-0">
+      {children}
+    </h1>
+  ),
+  h2: ({ children }) => (
+    <h2 className="text-xl font-bold text-neutral-100 mt-7 mb-3 first:mt-0">
+      {children}
+    </h2>
+  ),
+  h3: ({ children }) => (
+    <h3 className="text-lg font-semibold text-neutral-100 mt-6 mb-2 first:mt-0">
+      {children}
+    </h3>
+  ),
+  p: ({ children }) => (
+    <p className="text-[15px] leading-relaxed text-neutral-300 mb-4">
+      {children}
+    </p>
+  ),
+  a: ({ children, href }) => (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="text-aeblue-400 hover:text-aeblue-500 underline underline-offset-2 decoration-aeblue-400/40 hover:decoration-aeblue-500"
+    >
+      {children}
+    </a>
+  ),
+  strong: ({ children }) => (
+    <strong className="font-semibold text-neutral-100">{children}</strong>
+  ),
+  em: ({ children }) => <em className="italic text-neutral-200">{children}</em>,
+  del: ({ children }) => (
+    <del className="text-neutral-500 line-through">{children}</del>
+  ),
+  ul: ({ children }) => (
+    <ul className="list-disc list-outside pl-5 mb-4 space-y-1 text-[15px] leading-relaxed text-neutral-300">
+      {children}
+    </ul>
+  ),
+  ol: ({ children }) => (
+    <ol className="list-decimal list-outside pl-5 mb-4 space-y-1 text-[15px] leading-relaxed text-neutral-300">
+      {children}
+    </ol>
+  ),
+  li: ({ children }) => <li className="pl-1">{children}</li>,
+  blockquote: ({ children }) => (
+    <blockquote className="border-l-2 border-aepurple-500/50 pl-4 my-4 text-neutral-400 italic">
+      {children}
+    </blockquote>
+  ),
+  hr: () => <hr className="border-ink-700 my-6" />,
+  code: ({ className, children }) => {
+    const isBlock = /language-/.test(className || "");
+    if (isBlock) {
+      return <code className={className}>{children}</code>;
+    }
+    return (
+      <code className="px-1.5 py-0.5 rounded bg-ink-800 text-aecyan-400 text-[0.85em] font-mono">
+        {children}
+      </code>
+    );
+  },
+  pre: ({ children }) => (
+    <pre className="bg-ink-900 border border-ink-800 rounded-lg p-3.5 mb-4 overflow-x-auto text-[13px] leading-relaxed font-mono text-neutral-300">
+      {children}
+    </pre>
+  ),
+  table: ({ children }) => (
+    <div className="overflow-x-auto mb-4">
+      <table className="w-full text-[14px] text-left border-collapse">
+        {children}
+      </table>
+    </div>
+  ),
+  thead: ({ children }) => (
+    <thead className="border-b border-ink-700">{children}</thead>
+  ),
+  th: ({ children }) => (
+    <th className="px-3 py-2 font-semibold text-neutral-100">{children}</th>
+  ),
+  td: ({ children }) => (
+    <td className="px-3 py-2 border-t border-ink-800 text-neutral-300">
+      {children}
+    </td>
+  ),
+  img: ({ src, alt }) => (
+    <img src={src} alt={alt} className="rounded-lg max-w-full my-4" />
+  ),
+};
 
 function relativeTime(unixSeconds: number): string {
   const diffSec = Math.max(0, Date.now() / 1000 - unixSeconds);
@@ -69,9 +165,11 @@ export default function ReaderFeed() {
         <h2 className="text-2xl font-bold text-neutral-100 mb-4">
           {selected.title}
         </h2>
-        <pre className="whitespace-pre-wrap font-sans text-[15px] leading-relaxed text-neutral-300">
-          {selected.markdown}
-        </pre>
+        <div className="max-w-none">
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+            {selected.markdown}
+          </ReactMarkdown>
+        </div>
       </div>
     );
   }
