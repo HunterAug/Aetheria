@@ -197,6 +197,34 @@ the local loop above, which keeps working unchanged:
   - Local SQLite `list_posts`/`get_post` kept working throughout (both
     posts decrypt/read back correctly from the local cache).
 
+## Identity key encryption (as of 2026-08-02)
+
+`delegate/src/keys.rs`'s `identity.key` is now encrypted at rest
+(Argon2id-derived key wrapping the 64 bytes of key material with
+AES-256-GCM) instead of plaintext. **This means `load_or_generate` now
+blocks on an interactive passphrase prompt (`rpassword`) every time the
+delegate starts** - it reads from the real console device on Windows, not
+redirected/piped stdin (confirmed via `rpassword`'s own
+`tests/no-terminal.rs`), so a delegate launched as a background/piped
+process (as this session has been doing all along for testing) will hang
+at that prompt with no way to answer it from here. **Whoever runs the
+delegate needs a real interactive terminal to enter the passphrase into**
+- this is a genuine workflow change from before, not a bug to route around.
+Covered by unit tests in `keys.rs` that exercise the encryption/migration
+logic directly (bypassing the prompt) instead.
+
+The pre-existing plaintext `identity.key` on this machine corresponds to a
+real pubkey with already-published `PublisherProfileContract`/
+`ContentIndexContract` instances (see keys above) - migration re-encrypts
+those *same* key bytes rather than generating a fresh keypair, so the
+existing contracts stay signable. The user, not this session, needs to be
+the one who runs that first migration and sets the passphrase, since they're
+the one who has to remember it afterward.
+
+TODO(later), noted in `keys.rs`'s module docs: once Tauri spawns this as a
+sidecar with no attached terminal, this needs a real `unlock { passphrase }`
+IPC message the UI sends before any signing operation, not a stdin prompt.
+
 ## Known stub / unimplemented areas
 
 - `delegate/src/nwc.rs` — no real NWC/Nostr relay connection yet (Phase 3).
