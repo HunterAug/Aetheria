@@ -2,44 +2,27 @@ import { useState } from "react";
 import Editor from "./components/Editor";
 import ReaderFeed from "./components/ReaderFeed";
 import SubscriberPortal from "./components/SubscriberPortal";
+import Sidebar from "./components/Sidebar";
+import RightRail from "./components/RightRail";
 
-type Tab = "editor" | "feed" | "subscribers";
-
-const TABS: { id: Tab; label: string }[] = [
-  { id: "editor", label: "Draft" },
-  { id: "feed", label: "Feed" },
-  { id: "subscribers", label: "Subscribers" },
-];
+export type Tab = "editor" | "feed" | "subscribers";
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("feed");
 
   return (
-    <div className="min-h-screen bg-neutral-50 text-neutral-900">
-      <header className="border-b border-neutral-200 px-6 py-4 flex items-center justify-between">
-        <h1 className="text-lg font-bold">Aetheria</h1>
-        <nav className="flex gap-2">
-          {TABS.map((t) => (
-            <button
-              key={t.id}
-              onClick={() => setTab(t.id)}
-              className={`px-3 py-1.5 rounded text-sm font-medium ${
-                tab === t.id
-                  ? "bg-neutral-900 text-white"
-                  : "text-neutral-600 hover:bg-neutral-100"
-              }`}
-            >
-              {t.label}
-            </button>
-          ))}
-        </nav>
-      </header>
+    <div className="min-h-screen bg-ink-950 text-neutral-200 flex justify-center">
+      <div className="flex w-full max-w-6xl">
+        <Sidebar tab={tab} onChange={setTab} />
 
-      <main>
-        {tab === "editor" && <Editor />}
-        {tab === "feed" && <ReaderFeed />}
-        {tab === "subscribers" && <SubscriberPortal />}
-      </main>
+        <main className="flex-1 min-w-0 border-x border-ink-800">
+          {tab === "editor" && <Editor />}
+          {tab === "feed" && <ReaderFeed />}
+          {tab === "subscribers" && <SubscriberPortal />}
+        </main>
+
+        <RightRail />
+      </div>
     </div>
   );
 }

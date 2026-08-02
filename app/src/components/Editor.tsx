@@ -7,6 +7,9 @@ type Status =
   | { kind: "success"; postId: string }
   | { kind: "error"; message: string };
 
+const inputClass =
+  "w-full rounded-lg bg-ink-900 border border-ink-700 p-2.5 text-sm text-neutral-200 placeholder:text-neutral-500 focus:outline-none focus:ring-2 focus:ring-aeblue-500/50 focus:border-aeblue-500";
+
 export default function Editor() {
   const [title, setTitle] = useState("");
   const [summary, setSummary] = useState("");
@@ -38,42 +41,42 @@ export default function Editor() {
   const canPublish = title.trim() !== "" && markdown.trim() !== "";
 
   return (
-    <div className="p-6 max-w-2xl">
-      <h2 className="text-xl font-semibold mb-1">Draft</h2>
-      <p className="text-sm text-neutral-500 mb-4">
-        Publishes straight to the local Delegate's SQLite cache — subscriber
-        posts are AES-256-GCM encrypted with this epoch's key. Freenet
-        broadcast isn't wired up yet, so this only affects your local feed.
+    <div className="px-6 py-5 max-w-2xl">
+      <h2 className="text-xl font-semibold text-neutral-100 mb-1">Draft</h2>
+      <p className="text-sm text-neutral-500 mb-5">
+        Publishes to your local Delegate — subscriber posts are AES-256-GCM
+        encrypted with this epoch's key before they're stored.
       </p>
 
       <div className="space-y-3">
         <input
-          className="w-full rounded border border-neutral-300 p-2 text-sm"
+          className={inputClass}
           placeholder="Title"
           value={title}
           onChange={(e) => setTitle(e.target.value)}
         />
         <input
-          className="w-full rounded border border-neutral-300 p-2 text-sm"
+          className={inputClass}
           placeholder="One-line summary (shown unencrypted in the feed)"
           value={summary}
           onChange={(e) => setSummary(e.target.value)}
         />
         <textarea
-          className="w-full h-64 rounded border border-neutral-300 p-3 font-mono text-sm"
+          className={`${inputClass} h-64 font-mono`}
           placeholder="Write your article in Markdown..."
           value={markdown}
           onChange={(e) => setMarkdown(e.target.value)}
         />
 
-        <div className="flex items-center justify-between">
-          <label className="flex items-center gap-2 text-sm text-neutral-700">
+        <div className="flex items-center justify-between pt-1">
+          <label className="flex items-center gap-2 text-sm text-neutral-400">
             <input
               type="checkbox"
               checked={access === "subscriber"}
               onChange={(e) =>
                 setAccess(e.target.checked ? "subscriber" : "public")
               }
+              className="accent-aeblue-500"
             />
             Subscriber-only
           </label>
@@ -81,19 +84,19 @@ export default function Editor() {
           <button
             onClick={publish}
             disabled={!canPublish || status.kind === "publishing"}
-            className="px-4 py-1.5 rounded bg-neutral-900 text-white text-sm font-medium disabled:opacity-40"
+            className="px-5 py-2 rounded-lg bg-aetheria-gradient text-white text-sm font-semibold shadow-lg shadow-aeblue-600/20 hover:brightness-110 transition disabled:opacity-40 disabled:cursor-not-allowed"
           >
             {status.kind === "publishing" ? "Publishing…" : "Publish"}
           </button>
         </div>
 
         {status.kind === "success" && (
-          <p className="text-sm text-green-700">
-            Published (post {status.postId.slice(0, 8)}…) — check the Feed tab.
+          <p className="text-sm text-aecyan-400">
+            Published (post {status.postId.slice(0, 8)}…) — check the Home tab.
           </p>
         )}
         {status.kind === "error" && (
-          <p className="text-sm text-red-700">{status.message}</p>
+          <p className="text-sm text-red-400">{status.message}</p>
         )}
       </div>
     </div>

@@ -1,3 +1,19 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  @apply bg-ink-950 text-neutral-200;
+}
+
+::selection {
+  @apply bg-aeblue-500/40 text-white;
+}
+
+* {
+  scrollbar-color: theme(colors.ink.700) transparent;
+}

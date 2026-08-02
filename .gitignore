@@ -13,6 +13,7 @@ node_modules/
 dist/
 dist-ssr/
 *.local
+*.tsbuildinfo
 app/src-tauri/target/
 
 # Tauri build outputs
