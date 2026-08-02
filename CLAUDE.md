@@ -225,6 +225,16 @@ TODO(later), noted in `keys.rs`'s module docs: once Tauri spawns this as a
 sidecar with no attached terminal, this needs a real `unlock { passphrase }`
 IPC message the UI sends before any signing operation, not a stdin prompt.
 
+**Dev convenience, approved by the user for local testing only**: set
+`AETHERIA_DEV_PASSPHRASE` in the environment to skip the interactive prompt
+entirely (used for both the migration and unlock paths) - loudly logged as
+insecure every time it's used. This is what re-enabled unattended
+start/stop of the delegate during this session's testing; the real
+identity's plaintext file was migrated using this env var on 2026-08-02
+(passphrase `aetheria-dev-local-only`, chosen for this dev machine only -
+this is not a secret worth protecting, treat it as public). Never set this
+outside a local dev loop.
+
 ## Known stub / unimplemented areas
 
 - `delegate/src/nwc.rs` — no real NWC/Nostr relay connection yet (Phase 3).

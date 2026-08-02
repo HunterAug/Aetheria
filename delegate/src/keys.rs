@@ -48,7 +48,7 @@ impl DelegateKeys {
 
     pub fn load_or_generate(path: &Path) -> Result<Self> {
         if !path.exists() {
-            let passphrase = prompt_new_passphrase()?;
+            let passphrase = passphrase_for_new_identity()?;
             let keys = Self::generate();
             keys.save(path, &passphrase)?;
             return Ok(keys);
@@ -61,14 +61,12 @@ impl DelegateKeys {
                     "identity file is in the old unencrypted format - migrating to encrypted storage"
                 );
                 let keys = Self::from_key_material(&raw)?;
-                let passphrase = prompt_new_passphrase()?;
+                let passphrase = passphrase_for_new_identity()?;
                 keys.save(path, &passphrase)?;
                 Ok(keys)
             }
             ENCRYPTED_LEN => {
-                let passphrase =
-                    rpassword::prompt_password("Enter passphrase to unlock your Aetheria identity: ")
-                        .context("reading passphrase")?;
+                let passphrase = passphrase_for_unlock()?;
                 Self::load_encrypted(&raw, &passphrase)
             }
             other => anyhow::bail!(
@@ -138,6 +136,37 @@ fn derive_wrapping_key(passphrase: &str, salt: &[u8]) -> Result<[u8; 32]> {
         .hash_password_into(passphrase.as_bytes(), salt, &mut key)
         .map_err(|e| anyhow::anyhow!("deriving key from passphrase: {e}"))?;
     Ok(key)
+}
+
+/// Set to skip the interactive passphrase prompt entirely during local
+/// dev/testing - **insecure, dev-only**, since it lets anything that can
+/// read this process's environment (or a shell history file) recover the
+/// passphrase. Never set this outside a local dev loop.
+const DEV_PASSPHRASE_ENV_VAR: &str = "AETHERIA_DEV_PASSPHRASE";
+
+fn warn_dev_passphrase_in_use() {
+    tracing::warn!(
+        "{DEV_PASSPHRASE_ENV_VAR} is set - using it instead of an interactive prompt. \
+         This is insecure and for local dev/testing only; never set this in a real deployment."
+    );
+}
+
+fn passphrase_for_new_identity() -> Result<String> {
+    if let Ok(p) = std::env::var(DEV_PASSPHRASE_ENV_VAR) {
+        warn_dev_passphrase_in_use();
+        anyhow::ensure!(!p.is_empty(), "{DEV_PASSPHRASE_ENV_VAR} is set but empty");
+        return Ok(p);
+    }
+    prompt_new_passphrase()
+}
+
+fn passphrase_for_unlock() -> Result<String> {
+    if let Ok(p) = std::env::var(DEV_PASSPHRASE_ENV_VAR) {
+        warn_dev_passphrase_in_use();
+        return Ok(p);
+    }
+    rpassword::prompt_password("Enter passphrase to unlock your Aetheria identity: ")
+        .context("reading passphrase")
 }
 
 fn prompt_new_passphrase() -> Result<String> {
