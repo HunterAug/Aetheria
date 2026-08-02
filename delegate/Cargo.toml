@@ -12,8 +12,15 @@ path = "src/main.rs"
 aetheria-types = { path = "../contracts/aetheria-types" }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
-tokio-tungstenite = "0.24"
+# Pinned to match freenet-stdlib 0.8's own tokio-tungstenite dependency -
+# `WebApi::start` takes a `WebSocketStream` of that exact crate version, and
+# cargo won't unify two different semver-incompatible versions for us.
+tokio-tungstenite = "0.27"
 futures-util = "0.3"
+
+freenet-stdlib = { version = "0.8", features = ["net"] }
+ciborium = "0.2"
+serde-big-array = "0.5"
 
 rusqlite = { version = "0.32", features = ["bundled"] }
 

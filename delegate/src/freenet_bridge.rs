@@ -1,58 +1,251 @@
 //! Bridge to a local Freenet node over its native host protocol (a
 //! WebSocket API exposed by `freenet-core` at a local port).
 //!
-//! Responsible for PUT/GET/subscribe against the four Aetheria contracts
-//! (`PublisherProfileContract`, `ContentIndexContract`, `PostDataContract`,
-//! `SubscriberRegistryContract`). Confirmed against a real running local
-//! node (2026-08-02): the WebSocket API lives at `ws://127.0.0.1:7509/`
-//! (root path, not `/contract/command` as originally guessed), default port
-//! 7509. Manually verified end-to-end with the `fdev` CLI: built
-//! `post-data-contract` with `fdev build`, published a real
-//! `EncryptedPostPayload` state with `fdev publish ... contract --state`,
-//! and read it back with `fdev execute get` - byte-for-byte round trip.
+//! Responsible for PUT/GET/UPDATE against the Aetheria contracts
+//! (`PublisherProfileContract`, `ContentIndexContract`, `PostDataContract`;
+//! `SubscriberRegistryContract` is untouched - no real NWC subscriber flow
+//! yet, see `nwc.rs`).
 //!
-//! Still `todo!()` here: this struct doesn't yet talk to the node itself.
-//! The real client library is `freenet_stdlib::client_api::WebApi` (connects
-//! over the same websocket, `send(ClientRequest)` / `recv() -> HostResult`)
-//! - swap these stubs for that once the delegate needs to do this
-//! programmatically instead of shelling out to `fdev`.
+//! **Corrected 2026-08-02** from the CLAUDE.md note this module's docs used
+//! to carry: the client WebSocket endpoint is
+//! `ws://127.0.0.1:7509/v1/contract/command?encodingProtocol=native`, not
+//! the root path `/`. Two separate mistakes stacked there:
+//!
+//! 1. Root path serves the HTML dashboard (`curl -i http://127.0.0.1:7509/`
+//!    returns `200` with an HTML body for *any* request, upgrade headers
+//!    included) and silently fails a `tokio-tungstenite` handshake with
+//!    "HTTP error: 200 OK" instead of the `101 Switching Protocols` a WS
+//!    upgrade needs. Confirmed with a raw `curl -i --max-time 3` upgrade
+//!    request against the real running node: root path answers `200`
+//!    unconditionally, `/v1/contract/command` answers `101`.
+//! 2. The path alone gets a `101`, but the node replies to the first real
+//!    request with a `HostResult` this crate's `bincode::deserialize` can't
+//!    parse ("invalid value: integer `12`, expected `Ok` or `Err`") unless
+//!    the query string carries `?encodingProtocol=native` - found by reading
+//!    `fdev`'s own connect call (`fdev-0.3.280/src/commands/v1.rs` and
+//!    `wasm_runtime/state/v1.rs`, both cached locally in the cargo registry
+//!    alongside `freenet-stdlib`'s source), which builds exactly this URL
+//!    before handing the stream to the same `WebApi::start`. Without it the
+//!    node apparently defaults to a different (flatbuffers) wire encoding
+//!    that `regular.rs`'s always-bincode `WebApi` can't decode.
+//!
+//! The earlier CLAUDE.md note came from reading `freenet_stdlib`'s
+//! `client_api` source (which documents the wire *protocol*, not the URL) plus
+//! a working `fdev` round trip (which builds this exact URL internally rather
+//! than connecting at root) - neither actually exercised the literal
+//! connect string a raw `WebApi::start` caller needs to supply itself.
+//!
+//! Uses `freenet_stdlib::client_api::WebApi` directly - no shelling out to
+//! `fdev`. A `ContractRequest::Put` carries the full `ContractContainer`
+//! (code + params), so the node never needs the code pre-cached; the
+//! compiled WASM bytes are embedded in the delegate binary (see
+//! `contracts.rs`) from a build produced by `fdev build` ahead of time,
+//! keeping the runtime path free of any dependency on `fdev` being
+//! installed or on `PATH`.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use freenet_stdlib::client_api::{
+    ClientRequest, ContractRequest, ContractResponse, HostResponse, WebApi,
+};
+use freenet_stdlib::prelude::{
+    ContractCode, ContractContainer, ContractInstanceId, ContractKey, ContractWasmAPIVersion,
+    Parameters, RelatedContracts, State, UpdateData, WrappedContract, WrappedState,
+};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Mutex;
+
+pub const NODE_WS_URL: &str = "ws://127.0.0.1:7509/v1/contract/command?encodingProtocol=native";
+
+/// A single-attempt PUT against the real gateway-routed public network has
+/// been observed (2026-08-02, this same node) to fail transiently - "put
+/// failed after 1 peer attempt(s) ... awaited peer ... disconnected before
+/// replying" and "put timed out after 1 peer attempt(s)" both cleared on a
+/// bare retry with no code changes. `freenet-core` itself reports "0
+/// infra-retries" for these, so retrying is left to the client. Applied to
+/// GET/UPDATE too since both go over the same gateway-routed path.
+const MAX_ATTEMPTS: u32 = 4;
+const RETRY_DELAY: Duration = Duration::from_millis(1500);
 
 pub struct FreenetBridge {
-    #[allow(dead_code)]
-    node_ws_url: String,
+    // A single shared connection, guarded so a send+recv round trip for one
+    // request completes atomically w.r.t. any other caller - two interleaved
+    // requests on the same socket could otherwise read each other's response.
+    api: Mutex<WebApi>,
 }
 
 impl FreenetBridge {
     /// Connect to a Freenet node running on this machine.
     pub async fn connect_local() -> Result<Self> {
-        // TODO(Phase 3): replace with `freenet_stdlib::client_api::WebApi`
-        // once the delegate actually needs to PUT/GET contract state itself.
+        let (stream, _) = tokio_tungstenite::connect_async(NODE_WS_URL)
+            .await
+            .with_context(|| format!("connecting to Freenet node at {NODE_WS_URL}"))?;
         Ok(Self {
-            node_ws_url: "ws://127.0.0.1:7509/".to_string(),
+            api: Mutex::new(WebApi::start(stream)),
         })
     }
 
-    // Not called yet - the current milestone only exercises the publisher's
-    // own publish/feed/read loop against the local SQLite cache. These get
-    // wired in once a local Freenet node is actually running to develop
-    // against (see module docs).
-    #[allow(dead_code)]
-    pub async fn get_state(&self, contract_id: &str) -> Result<Vec<u8>> {
-        let _ = contract_id;
-        todo!("Freenet GET not yet implemented")
+    /// Publishes a brand-new contract instance (code + initial state) and
+    /// returns the network-assigned key. Only meaningful the first time a
+    /// given (code, params) pair is published - callers are responsible for
+    /// remembering the returned key (see `contracts.rs` /
+    /// `db::LocalStore::{get,set}_contract_registration`) and using
+    /// `update_state` afterwards instead of calling this again.
+    pub async fn put_new(
+        &self,
+        code: Arc<ContractCode<'static>>,
+        params: Parameters<'static>,
+        initial_state: Vec<u8>,
+    ) -> Result<ContractKey> {
+        let contract = ContractContainer::Wasm(ContractWasmAPIVersion::V1(WrappedContract::new(
+            code, params,
+        )));
+        let request = ClientRequest::ContractOp(ContractRequest::Put {
+            contract,
+            state: WrappedState::new(initial_state),
+            related_contracts: RelatedContracts::new(),
+            subscribe: false,
+            blocking_subscribe: false,
+        });
+        let mut api = self.api.lock().await;
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            api.send(request.clone())
+                .await
+                .map_err(|e| anyhow::anyhow!("sending PUT request: {e}"))?;
+
+            let outcome = loop {
+                match api.recv().await {
+                    Ok(HostResponse::ContractResponse(ContractResponse::PutResponse { key })) => {
+                        break Ok(key)
+                    }
+                    Ok(other) => {
+                        tracing::debug!(?other, "ignoring unrelated host response while awaiting PUT");
+                        continue;
+                    }
+                    Err(e) => break Err(anyhow::anyhow!("PUT failed: {e}")),
+                }
+            };
+
+            match outcome {
+                Ok(key) => return Ok(key),
+                Err(e) if attempt < MAX_ATTEMPTS => {
+                    tracing::warn!(attempt, error = %e, "PUT failed, retrying");
+                    tokio::time::sleep(RETRY_DELAY).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        unreachable!("loop above always returns on its last iteration")
     }
 
-    #[allow(dead_code)]
-    pub async fn put_state(&self, contract_id: &str, state: &[u8]) -> Result<()> {
-        let _ = (contract_id, state);
-        todo!("Freenet PUT not yet implemented")
+    /// Overwrites an already-published contract's state.
+    ///
+    /// Always sends the *full* new state rather than a delta. `ContentIndexContract`'s
+    /// `update_state` merges whatever `UpdateData::State` it's given with what
+    /// it already has (union by `post_id`, see that contract's `merge`), so a
+    /// full-state update is simpler than computing a delta client-side and
+    /// idempotent under retries; the tradeoff is re-sending the whole index on
+    /// every post instead of just the new entry, acceptable at this milestone's
+    /// scale.
+    pub async fn update_state(&self, key: ContractKey, new_full_state: Vec<u8>) -> Result<()> {
+        let request = ClientRequest::ContractOp(ContractRequest::Update {
+            key,
+            data: UpdateData::State(State::from(new_full_state)),
+        });
+        let mut api = self.api.lock().await;
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            api.send(request.clone())
+                .await
+                .map_err(|e| anyhow::anyhow!("sending UPDATE request: {e}"))?;
+
+            let outcome = loop {
+                match api.recv().await {
+                    Ok(HostResponse::ContractResponse(ContractResponse::UpdateResponse {
+                        ..
+                    })) => break Ok(()),
+                    Ok(other) => {
+                        tracing::debug!(
+                            ?other,
+                            "ignoring unrelated host response while awaiting UPDATE"
+                        );
+                        continue;
+                    }
+                    Err(e) => break Err(anyhow::anyhow!("UPDATE failed: {e}")),
+                }
+            };
+
+            match outcome {
+                Ok(()) => return Ok(()),
+                Err(e) if attempt < MAX_ATTEMPTS => {
+                    tracing::warn!(attempt, error = %e, "UPDATE failed, retrying");
+                    tokio::time::sleep(RETRY_DELAY).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        unreachable!("loop above always returns on its last iteration")
     }
 
+    /// Fetches a contract's current state. `Ok(None)` is the explicit
+    /// "contract not found" response, distinct from a network/protocol
+    /// error - callers use this to fall back to an empty initial state
+    /// rather than treating it as fatal.
+    pub async fn get_state(&self, key: ContractInstanceId) -> Result<Option<Vec<u8>>> {
+        let request = ClientRequest::ContractOp(ContractRequest::Get {
+            key,
+            return_contract_code: false,
+            subscribe: false,
+            blocking_subscribe: false,
+        });
+        let mut api = self.api.lock().await;
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            api.send(request.clone())
+                .await
+                .map_err(|e| anyhow::anyhow!("sending GET request: {e}"))?;
+
+            let outcome = loop {
+                match api.recv().await {
+                    Ok(HostResponse::ContractResponse(ContractResponse::GetResponse {
+                        state,
+                        ..
+                    })) => break Ok(Some(state.as_ref().to_vec())),
+                    Ok(HostResponse::ContractResponse(ContractResponse::NotFound { .. })) => {
+                        break Ok(None)
+                    }
+                    Ok(other) => {
+                        tracing::debug!(
+                            ?other,
+                            "ignoring unrelated host response while awaiting GET"
+                        );
+                        continue;
+                    }
+                    Err(e) => break Err(anyhow::anyhow!("GET failed: {e}")),
+                }
+            };
+
+            match outcome {
+                Ok(value) => return Ok(value),
+                Err(e) if attempt < MAX_ATTEMPTS => {
+                    tracing::warn!(attempt, error = %e, "GET failed, retrying");
+                    tokio::time::sleep(RETRY_DELAY).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        unreachable!("loop above always returns on its last iteration")
+    }
+
+    // TODO(Phase 4): real push-based subscription handling for the pinning
+    // daemon / live feed updates (design doc §7-8). `ContractRequest::Subscribe`
+    // is trivial to send, but nothing in this milestone consumes the
+    // `UpdateNotification` responses it would trigger (the delegate only ever
+    // does request/response PUT-GET-UPDATE cycles today), so wiring it up now
+    // would be a silent no-op rather than a real feature.
     #[allow(dead_code)]
-    pub async fn subscribe(&self, contract_id: &str) -> Result<()> {
-        let _ = contract_id;
-        todo!("Freenet SUBSCRIBE not yet implemented")
+    pub async fn subscribe(&self, _key: ContractInstanceId) -> Result<()> {
+        todo!("Freenet subscribe not yet consumed anywhere (Phase 4)")
     }
 }

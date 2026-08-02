@@ -35,14 +35,30 @@ crypto flows, and the 16-week roadmap).
   **47021**. Don't move either back onto 3000.
 - A real `freenet` node is installed and runs in normal (network) mode,
   connected to the public gateway network — dashboard at
-  `http://127.0.0.1:7509/`. Its WebSocket API is `ws://127.0.0.1:7509/`
-  (root path, confirmed by reading `freenet-stdlib`'s `client_api` source
-  and by successfully round-tripping a contract through it - see below).
-  The node currently shows "only connected to gateways, NAT hole-punching
-  0/N" — that's about *other peers reaching this node*, not about this
-  node's own ability to GET/PUT contract state through its gateways, which
-  works fine (proven both by an official demo app loading through it and by
-  our own published test contract).
+  `http://127.0.0.1:7509/`. Its **client WebSocket API is
+  `ws://127.0.0.1:7509/v1/contract/command?encodingProtocol=native`** - NOT
+  the root path `/` (that serves the HTML dashboard for any request,
+  upgrade headers included, and fails a `tokio-tungstenite` handshake with
+  "HTTP error: 200 OK" instead of `101 Switching Protocols`), and NOT the
+  path alone without `?encodingProtocol=native` (you get a `101`, but the
+  first real response fails `bincode::deserialize` with "invalid value:
+  integer `12`, expected `Ok` or `Err`" - the node defaults to a different,
+  presumably flatbuffers, wire encoding otherwise). Found by reading `fdev`'s
+  own connect call (`fdev-0.3.280/src/commands/v1.rs`, cached locally in the
+  cargo registry) rather than guessing from `freenet-stdlib`'s protocol
+  docs. The node currently shows "only connected to gateways, NAT
+  hole-punching 0/N" — that's about *other peers reaching this node*, not
+  about this node's own ability to GET/PUT contract state through its
+  gateways.
+- **The real network is flaky in ways worth retrying, not debugging.**
+  PUT/UPDATE/GET against the public gateway network intermittently fail
+  with e.g. "put timed out after 1 peer attempt(s) (0 infra-retries on same
+  peer)" or "awaited peer \<addr\> disconnected before replying" - freenet-core
+  does not retry these itself. `delegate/src/freenet_bridge.rs` retries each
+  operation up to 4 times with a 1.5s delay client-side; even that isn't
+  always enough; the same request from a fresh process sometimes succeeds
+  immediately. This is inherent to the current network, not a bug in the
+  delegate - don't try to "fix" it away, just expect it when testing.
 - `fdev` (Freenet's dev CLI, crate `fdev` on crates.io — `cargo install fdev`,
   currently 0.3.280) is installed. **Known bug**: `fdev build` panics
   "Could not find workspace root" when installed via `cargo install` from
@@ -119,18 +135,84 @@ verified live in the browser, entirely local (no Freenet, no NWC):
   milestone), decryption always succeeds locally — this does **not** yet
   test the actual ECDH subscriber key-delivery path.
 
+**Real Freenet network integration is now wired up and verified live**
+(`delegate/src/freenet_bridge.rs`, `delegate/src/contracts.rs`), on top of
+the local loop above, which keeps working unchanged:
+
+- `FreenetBridge` uses `freenet_stdlib::client_api::WebApi` directly (no
+  shelling out to `fdev`) for real `Put`/`Update`/`Get` against
+  `ws://127.0.0.1:7509/v1/contract/command?encodingProtocol=native` (see the
+  environment note above for why that exact URL, not just the host:port).
+- Compiled contract WASM (`PublisherProfileContract`, `ContentIndexContract`,
+  `PostDataContract`) is embedded into the delegate binary via
+  `include_bytes!` pointing at each contract's `fdev build` output under its
+  (gitignored) `build/freenet/` directory - **you must run `fdev build`
+  for these three contracts before building the delegate** if their source
+  changed (see the `fdev build` / `CARGO_TARGET_DIR` note above; same
+  invocation, once per contract crate). This was the simplest working option
+  of the three considered (shell out to `fdev` at runtime; embed via
+  `include_bytes!` with a manual/CI build step; PUT code without `fdev` at
+  all) - it needed no new runtime dependency and `ContractRequest::Put`
+  already carries the full `ContractContainer` (code + params), so the node
+  never needs the code pre-cached.
+- On first run, the delegate publishes a fresh, empty `ContentIndexContract`
+  and a signed `PublisherProfileContract` pointing at it; both keys persist
+  in the SQLite `contract_registry` table (`db::LocalStore::{get,set}_contract_registration`)
+  and are reused (no re-publish, no network call) on every later run -
+  verified by killing and restarting the delegate process and confirming the
+  logged keys were identical and no "published X" log lines appeared.
+- `ipc.rs`'s `publish_post` now does both: the existing SQLite write (public
+  plaintext / subscriber AES-256-GCM ciphertext, unchanged), *and* mints a
+  fresh `PostDataContract` instance (`Parameters` = the post's 16-byte
+  `post_id`, so one shared compiled contract yields one instance key per
+  post) holding the same payload, then folds a signed `PostMetadataHeader`
+  for it into the publisher's `ContentIndexContract` via a full-state
+  `Update` (`ContentIndexContract::update_state` merges by `post_id`
+  itself, so a full-state resend is simpler than computing a delta
+  client-side, and idempotent under the retries below).
+- `ContentIndexState` and the wire shape of `PublisherProfile` are
+  hand-mirrored in `delegate/src/contracts.rs` rather than imported from the
+  contract crates (see that file's module docs for why - the `#[contract]`
+  macro's WASM exports risk colliding if more than one contract crate is
+  linked into one native binary). Keep both in sync by hand if either
+  contract's state struct changes.
+- **Verified live, 2026-08-02**, full round trip through the real IPC
+  protocol (`publish_post` over `ws://127.0.0.1:47021`) against the real
+  running node, independently confirmed with `fdev -p 7509 execute get
+  <key>` for every contract key involved (separate process, same
+  methodology as the earlier `fdev`-only verification):
+  - `PublisherProfileContract` `Ef8afAdP2UsuNmXQ6mF35miawtDbPbQkVLUEaeESPL7U`
+    - `content_index_contract_id` field correctly points at the
+    `ContentIndexContract` key below.
+  - `ContentIndexContract` `8QshRgPQtB9YBFxqLHRzMgHTiThUBZPkKPstbMrwmXLg` -
+    grew from an empty `posts: []` to two entries as posts were published,
+    each with a `post_contract_id` matching a real `PostDataContract` key.
+  - Public post → `PostDataContract` `62fpzvdb6KZ9UU2ehbbgeDJ51GNgaQ52W562mHS9wiNE`
+    - `cipher_text` holds the literal plaintext markdown, `nonce` all-zero,
+    matching the contract's documented public-post convention.
+  - Subscriber-only post → `PostDataContract`
+    `Hdh6LXTR4Kkaq4URoJoRtmjdX74MhEumSWJvsd1D5KAC` - `cipher_text` is
+    genuine AES-256-GCM ciphertext (unreadable garbage), `nonce` is
+    non-zero-random, confirming real encryption reached the network.
+  - Local SQLite `list_posts`/`get_post` kept working throughout (both
+    posts decrypt/read back correctly from the local cache).
+
 ## Known stub / unimplemented areas
 
 - `delegate/src/nwc.rs` — no real NWC/Nostr relay connection yet (Phase 3).
-- `delegate/src/freenet_bridge.rs` — no real Freenet client API calls yet
-  (still `todo!()`); nothing from the delegate is broadcast to the network,
-  everything in "Working end-to-end" above is local-only. We proved the
-  underlying network path works via the `fdev` CLI directly (see above) -
-  the remaining work is wiring `FreenetBridge` to do the same thing
-  programmatically via `freenet_stdlib::client_api::WebApi` instead of
-  shelling out to `fdev`.
+- `SubscriberRegistryContract` — untouched; no real NWC subscriber flow
+  exists yet for it to serve (Phase 3), so it's still unwired on purpose.
+- `FreenetBridge::subscribe` — sends nothing, still `todo!()`
+  (`// TODO(Phase 4)`); nothing in the delegate consumes the
+  `UpdateNotification` push responses a real subscription would trigger
+  (pinning daemon / live feed updates, design doc §7-8), so wiring the send
+  half up now would be a silent no-op.
 - ECDH-based subscriber key delivery (`crypto::derive_shared_secret` and
   friends) is implemented but not called from anywhere yet — needs the NWC
   payment listener to trigger it (Phase 3).
+- Per-post subscription tier is hardcoded to `required_tier_id: 0`
+  (`ipc.rs`'s `handle_publish_post`) — the UI doesn't expose multiple tiers
+  yet, and neither does the fresh `PublisherProfile` the delegate publishes
+  on first run (`subscription_tiers: vec![]`, `title: "Untitled Publication"`).
 - Proof-of-work spam mitigation (design doc §7) and the pinning daemon
   (§7, §8 Phase 4) are not started.

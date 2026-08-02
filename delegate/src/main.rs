@@ -10,6 +10,7 @@
 //! subsystem but most bodies are `todo!()` pending the real Freenet
 //! websocket API and NWC relay wiring.
 
+mod contracts;
 mod crypto;
 mod db;
 mod freenet_bridge;
@@ -41,9 +42,17 @@ async fn main() -> Result<()> {
     );
 
     let freenet = freenet_bridge::FreenetBridge::connect_local().await?;
+    let identity = contracts::ensure_publisher_identity(&freenet, &db, &keys)
+        .await
+        .context("publishing/loading this delegate's PublisherProfileContract and ContentIndexContract")?;
+    tracing::info!(
+        content_index = %identity.content_index_key.encoded_contract_id(),
+        publisher_profile = %identity.profile_key.encoded_contract_id(),
+        "Freenet publisher identity ready"
+    );
     let nwc = nwc::NwcClient::disconnected();
 
-    ipc::serve(IPC_PORT, db, keys, freenet, nwc).await
+    ipc::serve(IPC_PORT, db, keys, freenet, nwc, identity).await
 }
 
 /// Platform-appropriate app data directory (e.g. `%APPDATA%\aetheria\aetheria-delegate\data`

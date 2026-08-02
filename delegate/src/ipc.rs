@@ -8,7 +8,14 @@
 //! there is no Freenet broadcast or subscriber decryption yet (see
 //! `freenet_bridge.rs` and `nwc.rs`).
 
-use crate::{crypto, db::LocalStore, freenet_bridge::FreenetBridge, keys::DelegateKeys, nwc::NwcClient};
+use crate::{
+    contracts::{self, PublisherIdentity},
+    crypto,
+    db::LocalStore,
+    freenet_bridge::FreenetBridge,
+    keys::DelegateKeys,
+    nwc::NwcClient,
+};
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
 use rand::RngCore;
@@ -53,12 +60,11 @@ struct Response<'a> {
 
 struct Delegate {
     db: LocalStore,
-    #[allow(dead_code)]
     keys: DelegateKeys,
-    #[allow(dead_code)]
     freenet: FreenetBridge,
     #[allow(dead_code)]
     nwc: NwcClient,
+    identity: PublisherIdentity,
 }
 
 pub async fn serve(
@@ -67,12 +73,14 @@ pub async fn serve(
     keys: DelegateKeys,
     freenet: FreenetBridge,
     nwc: NwcClient,
+    identity: PublisherIdentity,
 ) -> Result<()> {
     let delegate = Arc::new(Mutex::new(Delegate {
         db,
         keys,
         freenet,
         nwc,
+        identity,
     }));
 
     let addr = format!("127.0.0.1:{port}");
@@ -90,7 +98,7 @@ pub async fn serve(
             while let Some(Ok(msg)) = read.next().await {
                 let Message::Text(text) = msg else { continue };
                 let reply = handle_message(&delegate, &text).await;
-                if write.send(Message::Text(reply)).await.is_err() {
+                if write.send(Message::Text(reply.into())).await.is_err() {
                     break;
                 }
             }
@@ -122,7 +130,7 @@ async fn handle_message(delegate: &Arc<Mutex<Delegate>>, text: &str) -> String {
             summary,
             markdown,
             access,
-        } => handle_publish_post(&d, &title, &summary, &markdown, &access),
+        } => handle_publish_post(&d, &title, &summary, &markdown, &access).await,
     };
 
     let response = match outcome {
@@ -195,7 +203,7 @@ fn handle_get_post(delegate: &Delegate, post_id_hex: &str) -> Result<serde_json:
     }))
 }
 
-fn handle_publish_post(
+async fn handle_publish_post(
     delegate: &Delegate,
     title: &str,
     summary: &str,
@@ -212,7 +220,12 @@ fn handle_publish_post(
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let epoch_id = current_epoch_id(now);
 
-    if access == "public" {
+    // Local SQLite write stays exactly as it was before Freenet was wired
+    // up - it's the fast local cache `list_posts`/`get_post` read from, and
+    // must keep working even though publishing now also reaches the
+    // network. `access_tier`/`network_cipher_text`/`network_nonce` are the
+    // extra pieces the network side needs alongside what's already stored.
+    let (access_tier, network_cipher_text, network_nonce) = if access == "public" {
         delegate.db.insert_post(
             &post_id,
             title,
@@ -224,6 +237,9 @@ fn handle_publish_post(
             None,
             None,
         )?;
+        // Matches PostDataContract's own convention for public posts: plain
+        // bytes in `cipher_text`, all-zero nonce (see its module docs).
+        (aetheria_types::AccessTier::Public, markdown.as_bytes().to_vec(), [0u8; 12])
     } else {
         let key = delegate
             .db
@@ -240,9 +256,34 @@ fn handle_publish_post(
             Some(&encrypted.cipher_text),
             Some(&encrypted.nonce),
         )?;
-    }
+        // TODO(Phase 3): real tier selection once the UI exposes more than
+        // one subscription tier (design doc §3.1) - defaults to tier 0.
+        (
+            aetheria_types::AccessTier::SubscriberOnly { required_tier_id: 0 },
+            encrypted.cipher_text,
+            encrypted.nonce,
+        )
+    };
 
-    Ok(serde_json::json!({ "post_id": hex::encode(post_id) }))
+    let post_contract_id = contracts::publish_post_to_network(
+        &delegate.freenet,
+        &delegate.keys,
+        &delegate.identity,
+        post_id,
+        title,
+        summary,
+        access_tier,
+        epoch_id,
+        now,
+        network_cipher_text,
+        network_nonce,
+    )
+    .await?;
+
+    Ok(serde_json::json!({
+        "post_id": hex::encode(post_id),
+        "post_contract_id": post_contract_id,
+    }))
 }
 
 /// Bucket the current time into a coarse ~30-day "billing epoch".
