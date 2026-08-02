@@ -68,6 +68,15 @@ export function InfoIcon({ className }: IconProps) {
   );
 }
 
+export function GearIcon({ className }: IconProps) {
+  return (
+    <svg {...base} className={className}>
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 13a7.4 7.4 0 0 0 .06-1 7.4 7.4 0 0 0-.06-1l2.1-1.6a.5.5 0 0 0 .12-.64l-2-3.4a.5.5 0 0 0-.6-.22l-2.5 1a7.6 7.6 0 0 0-1.7-1L14.4 2.6a.5.5 0 0 0-.5-.4h-4a.5.5 0 0 0-.5.4l-.4 2.54a7.6 7.6 0 0 0-1.7 1l-2.5-1a.5.5 0 0 0-.6.22l-2 3.4a.5.5 0 0 0 .12.64L4.6 11q-.06.5-.06 1t.06 1l-2.1 1.6a.5.5 0 0 0-.12.64l2 3.4a.5.5 0 0 0 .6.22l2.5-1a7.6 7.6 0 0 0 1.7 1l.4 2.54a.5.5 0 0 0 .5.4h4a.5.5 0 0 0 .5-.4l.4-2.54a7.6 7.6 0 0 0 1.7-1l2.5 1a.5.5 0 0 0 .6-.22l2-3.4a.5.5 0 0 0-.12-.64Z" />
+    </svg>
+  );
+}
+
 export function PlusIcon({ className }: IconProps) {
   return (
     <svg {...base} className={className}>

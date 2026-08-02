@@ -1,163 +1,170 @@
-import { useEffect, useRef, useState } from "react";
-import { delegate } from "../lib/delegate";
+import { useEffect, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import {
+  delegate,
+  type PostDetail,
+  type PostSummary,
+  type Profile as ProfileData,
+} from "../lib/delegate";
+import { markdownComponents } from "./ReaderFeed";
 
-const inputClass =
-  "w-full rounded-lg bg-ink-900 border border-ink-700 p-2.5 text-sm text-neutral-200 placeholder:text-neutral-500 focus:outline-none focus:ring-2 focus:ring-aeblue-500/50 focus:border-aeblue-500";
+function relativeTime(unixSeconds: number): string {
+  const diffSec = Math.max(0, Date.now() / 1000 - unixSeconds);
+  const units: [number, string][] = [
+    [60, "s"],
+    [60, "m"],
+    [24, "h"],
+    [365, "d"],
+  ];
+  let value = diffSec;
+  let suffix = "s";
+  for (const [size, label] of units) {
+    if (value < size) {
+      suffix = label;
+      break;
+    }
+    value /= size;
+    suffix = label;
+  }
+  return `${Math.max(1, Math.floor(value))}${suffix}`;
+}
 
-type Status =
-  | { kind: "idle" }
-  | { kind: "saving" }
-  | { kind: "success" }
-  | { kind: "partial"; message: string }
-  | { kind: "error"; message: string };
-
-export default function Profile() {
-  const [displayName, setDisplayName] = useState("");
-  const [bio, setBio] = useState("");
-  const [avatarDataUrl, setAvatarDataUrl] = useState<string | null>(null);
-  const [loaded, setLoaded] = useState(false);
-  const [status, setStatus] = useState<Status>({ kind: "idle" });
-  const fileInputRef = useRef<HTMLInputElement>(null);
+export default function Profile({
+  onEditProfile,
+}: {
+  onEditProfile: () => void;
+}) {
+  const [profile, setProfile] = useState<ProfileData | null>(null);
+  const [posts, setPosts] = useState<PostSummary[] | null>(null);
+  const [selected, setSelected] = useState<PostDetail | null>(null);
+  const [opening, setOpening] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    (async () => {
-      try {
-        const profile = await delegate.getProfile();
-        setDisplayName(profile.display_name);
-        setBio(profile.bio);
-        setAvatarDataUrl(profile.avatar_data_url);
-      } catch (err) {
-        setStatus({
-          kind: "error",
-          message: err instanceof Error ? err.message : String(err),
-        });
-      } finally {
-        setLoaded(true);
-      }
-    })();
+    delegate.getProfile().then(setProfile).catch(() => {});
+    delegate
+      .listPosts()
+      .then(setPosts)
+      .catch((err) =>
+        setError(err instanceof Error ? err.message : String(err)),
+      );
   }, []);
 
-  function onPickAvatar(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => setAvatarDataUrl(reader.result as string);
-    reader.readAsDataURL(file);
-    // Allow re-picking the same file later (input value otherwise stays put).
-    e.target.value = "";
-  }
-
-  async function save() {
-    setStatus({ kind: "saving" });
+  async function open(postId: string) {
+    setOpening(postId);
+    setError(null);
     try {
-      const result = await delegate.updateProfile({
-        display_name: displayName,
-        bio,
-        avatar_data_url: avatarDataUrl,
-      });
-      setDisplayName(result.display_name);
-      setBio(result.bio);
-      setAvatarDataUrl(result.avatar_data_url);
-      if (result.network_synced) {
-        setStatus({ kind: "success" });
-      } else {
-        setStatus({
-          kind: "partial",
-          message: `Saved locally — not yet synced to the network (${
-            result.network_error ?? "unknown error"
-          }). It'll keep this device's copy either way.`,
-        });
-      }
+      setSelected(await delegate.getPost(postId));
     } catch (err) {
-      setStatus({
-        kind: "error",
-        message: err instanceof Error ? err.message : String(err),
-      });
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setOpening(null);
     }
   }
 
-  const canSave = displayName.trim() !== "" && status.kind !== "saving";
+  const displayName = profile?.display_name?.trim() || "Untitled Publication";
+  const initial = (displayName.trim().charAt(0) || "A").toUpperCase();
+
+  if (selected) {
+    return (
+      <div className="px-6 py-5 max-w-2xl mx-auto">
+        <button
+          onClick={() => setSelected(null)}
+          className="text-sm text-neutral-500 hover:text-neutral-200 mb-5"
+        >
+          ← Back to profile
+        </button>
+        <h2 className="text-2xl font-bold text-neutral-100 mb-4">
+          {selected.title}
+        </h2>
+        <div className="max-w-none">
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+            {selected.markdown}
+          </ReactMarkdown>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="px-6 py-5 max-w-2xl">
-      <h2 className="text-xl font-semibold text-neutral-100 mb-1">Profile</h2>
-      <p className="text-sm text-neutral-500 mb-5">
-        Your display name and avatar are shown on every post you publish —
-        readers can click through from a post to see this page.
-      </p>
-
-      {!loaded ? (
-        <p className="text-sm text-neutral-500">Loading…</p>
-      ) : (
-        <div className="space-y-4">
+    <div className="max-w-2xl mx-auto">
+      <div className="px-6 py-6 border-b border-ink-800">
+        <div className="flex items-start justify-between gap-4">
           <div className="flex items-center gap-4">
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              className="w-16 h-16 rounded-full bg-aetheria-gradient flex items-center justify-center text-xl font-semibold text-white overflow-hidden shrink-0"
-              title="Change avatar"
-            >
-              {avatarDataUrl ? (
-                <img
-                  src={avatarDataUrl}
-                  alt=""
-                  className="w-full h-full object-cover"
-                />
-              ) : (
-                (displayName.trim().charAt(0) || "A").toUpperCase()
-              )}
-            </button>
-            <div>
-              <button
-                onClick={() => fileInputRef.current?.click()}
-                className="text-sm text-aeblue-400 hover:text-aeblue-500"
-              >
-                {avatarDataUrl ? "Change avatar" : "Upload avatar"}
-              </button>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/*"
-                onChange={onPickAvatar}
-                className="hidden"
+            {profile?.avatar_data_url ? (
+              <img
+                src={profile.avatar_data_url}
+                alt=""
+                className="w-16 h-16 rounded-full object-cover shrink-0"
               />
-            </div>
-          </div>
-
-          <input
-            className={inputClass}
-            placeholder="Display name"
-            value={displayName}
-            onChange={(e) => setDisplayName(e.target.value)}
-          />
-          <textarea
-            className={`${inputClass} h-28`}
-            placeholder="Short bio, shown on your profile page"
-            value={bio}
-            onChange={(e) => setBio(e.target.value)}
-          />
-
-          <div className="flex items-center justify-between pt-1">
-            <div className="text-sm">
-              {status.kind === "success" && (
-                <span className="text-aecyan-400">Saved.</span>
-              )}
-              {status.kind === "partial" && (
-                <span className="text-amber-400">{status.message}</span>
-              )}
-              {status.kind === "error" && (
-                <span className="text-red-400">{status.message}</span>
+            ) : (
+              <div className="w-16 h-16 rounded-full bg-aetheria-gradient flex items-center justify-center text-xl font-semibold text-white shrink-0">
+                {initial}
+              </div>
+            )}
+            <div>
+              <h2 className="text-xl font-bold text-neutral-100">
+                {displayName}
+              </h2>
+              {profile?.bio && (
+                <p className="text-sm text-neutral-400 mt-1 max-w-md">
+                  {profile.bio}
+                </p>
               )}
             </div>
-            <button
-              onClick={save}
-              disabled={!canSave}
-              className="px-5 py-2 rounded-lg bg-aetheria-gradient text-white text-sm font-semibold shadow-lg shadow-aeblue-600/20 hover:brightness-110 transition disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              {status.kind === "saving" ? "Saving…" : "Save"}
-            </button>
           </div>
+          <button
+            onClick={onEditProfile}
+            className="shrink-0 text-sm text-neutral-400 hover:text-neutral-200 border border-ink-700 rounded-lg px-3 py-1.5 hover:bg-ink-900 transition"
+          >
+            Edit profile
+          </button>
         </div>
+      </div>
+
+      {error && <p className="text-sm text-red-400 px-6 pt-4">{error}</p>}
+
+      {posts === null && !error && (
+        <p className="text-sm text-neutral-500 px-6 py-8">Loading…</p>
       )}
+      {posts?.length === 0 && (
+        <p className="text-sm text-neutral-500 px-6 py-8">
+          No posts published yet.
+        </p>
+      )}
+
+      <ul className="divide-y divide-ink-800">
+        {posts?.map((post) => (
+          <li key={post.post_id}>
+            <button
+              onClick={() => open(post.post_id)}
+              disabled={opening === post.post_id}
+              className="w-full text-left px-6 py-4 hover:bg-ink-900/60 transition-colors"
+            >
+              <div className="flex items-center gap-2 text-sm">
+                <span className="font-semibold text-neutral-100">
+                  {post.title}
+                </span>
+                <span className="text-neutral-500">
+                  {relativeTime(post.published_at)}
+                </span>
+                {post.access_level === "subscriber" && (
+                  <span className="text-xs bg-aepurple-500/15 text-aepurple-400 px-1.5 py-0.5 rounded">
+                    Subscriber
+                  </span>
+                )}
+                {opening === post.post_id && (
+                  <span className="text-xs text-neutral-500">opening…</span>
+                )}
+              </div>
+              <p className="text-sm text-neutral-400 mt-0.5 truncate">
+                {post.summary}
+              </p>
+            </button>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

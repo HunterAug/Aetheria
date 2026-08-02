@@ -8,7 +8,7 @@ import {
   type Profile,
 } from "../lib/delegate";
 
-const markdownComponents: Components = {
+export const markdownComponents: Components = {
   h1: ({ children }) => (
     <h1 className="text-2xl font-bold text-neutral-100 mt-8 mb-3 first:mt-0">
       {children}

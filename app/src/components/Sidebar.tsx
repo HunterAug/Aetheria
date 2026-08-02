@@ -1,4 +1,12 @@
-import { EditIcon, HomeIcon, InfoIcon, PlusIcon, UserIcon, UsersIcon } from "./icons";
+import {
+  EditIcon,
+  GearIcon,
+  HomeIcon,
+  InfoIcon,
+  PlusIcon,
+  UserIcon,
+  UsersIcon,
+} from "./icons";
 import type { Tab } from "../App";
 
 const NAV: { id: Tab; label: string; icon: (p: { className?: string }) => JSX.Element }[] = [
@@ -7,6 +15,7 @@ const NAV: { id: Tab; label: string; icon: (p: { className?: string }) => JSX.El
   { id: "profile", label: "Profile", icon: UserIcon },
   { id: "subscribers", label: "Subscribers", icon: UsersIcon },
   { id: "about", label: "About", icon: InfoIcon },
+  { id: "settings", label: "Settings", icon: GearIcon },
 ];
 
 export default function Sidebar({
