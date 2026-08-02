@@ -1,0 +1,38 @@
+# Rust
+/target/
+**/target/
+Cargo.lock.bak
+*.pdb
+
+# Node / Frontend
+node_modules/
+dist/
+dist-ssr/
+*.local
+app/src-tauri/target/
+
+# Tauri build outputs
+app/src-tauri/gen/
+
+# Local SQLite / Delegate runtime data
+*.sqlite
+*.sqlite3
+*.db
+delegate/data/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*

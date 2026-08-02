@@ -1,0 +1,15 @@
+[package]
+name = "publisher-profile-contract"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+aetheria-types = { path = "../aetheria-types" }
+serde = { workspace = true }
+ciborium = "0.2"
+freenet-stdlib = "0.8"
+ed25519-dalek = { workspace = true }
