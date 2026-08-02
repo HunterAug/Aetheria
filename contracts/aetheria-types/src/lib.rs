@@ -4,6 +4,10 @@
 //! authoritative schema and cryptographic flow this crate implements.
 
 use serde::{Deserialize, Serialize};
+use serde_big_array::BigArray;
+
+// serde's built-in array support only covers lengths 0-32; the 64-byte
+// signature and 33-byte compressed-pubkey fields below need `BigArray`.
 
 /// A subscription pricing tier offered by a publisher.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,6 +41,7 @@ pub struct PostMetadataHeader {
     pub epoch_id: u32,
     pub published_at: u64,
     /// Ed25519 signature over the header bytes, by the publisher's master key.
+    #[serde(with = "BigArray")]
     pub signature: [u8; 64],
 }
 
@@ -66,6 +71,7 @@ pub struct EncryptedPostPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EncryptedKeyBundle {
     /// Secp256k1 public key of the subscriber this bundle was encrypted for.
+    #[serde(with = "BigArray")]
     pub subscriber_pubkey: [u8; 33],
     pub epoch_id: u32,
     /// AES-256-GCM(Si, nonce_k, Kepoch).

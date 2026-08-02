@@ -13,3 +13,4 @@ serde = { workspace = true }
 ciborium = "0.2"
 freenet-stdlib = "0.8"
 ed25519-dalek = { workspace = true }
+serde-big-array = "0.5"

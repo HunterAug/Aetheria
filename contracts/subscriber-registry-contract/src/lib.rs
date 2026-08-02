@@ -85,10 +85,14 @@ impl ContractInterface for SubscriberRegistryContract {
     ) -> Result<StateSummary<'static>, ContractError> {
         let parsed: SubscriberRegistryState = ciborium::from_reader(state.as_ref())
             .map_err(|e| ContractError::Deser(e.to_string()))?;
-        let keys: Vec<([u8; 33], u32)> = parsed
+        // serde's built-in array support tops out at 32 bytes, so the
+        // 33-byte compressed pubkey is represented as `Vec<u8>` in this
+        // internal summary type (unlike the persisted state, which uses
+        // `BigArray` via `EncryptedKeyBundle`).
+        let keys: Vec<(Vec<u8>, u32)> = parsed
             .bundles
             .iter()
-            .map(|b| (b.subscriber_pubkey, b.epoch_id))
+            .map(|b| (b.subscriber_pubkey.to_vec(), b.epoch_id))
             .collect();
 
         let mut buf = Vec::new();
@@ -104,7 +108,7 @@ impl ContractInterface for SubscriberRegistryContract {
     ) -> Result<StateDelta<'static>, ContractError> {
         let current: SubscriberRegistryState = ciborium::from_reader(state.as_ref())
             .map_err(|e| ContractError::Deser(e.to_string()))?;
-        let known: Vec<([u8; 33], u32)> = ciborium::from_reader(summary.as_ref())
+        let known: Vec<(Vec<u8>, u32)> = ciborium::from_reader(summary.as_ref())
             .map_err(|e| ContractError::Deser(e.to_string()))?;
 
         let delta = SubscriberRegistryState {
@@ -112,7 +116,7 @@ impl ContractInterface for SubscriberRegistryContract {
             bundles: current
                 .bundles
                 .into_iter()
-                .filter(|b| !known.contains(&(b.subscriber_pubkey, b.epoch_id)))
+                .filter(|b| !known.contains(&(b.subscriber_pubkey.to_vec(), b.epoch_id)))
                 .collect(),
         };
 

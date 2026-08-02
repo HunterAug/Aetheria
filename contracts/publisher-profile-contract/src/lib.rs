@@ -11,6 +11,7 @@ use aetheria_types::Tier;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use freenet_stdlib::prelude::*;
 use serde::{Deserialize, Serialize};
+use serde_big_array::BigArray;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublisherProfile {
@@ -25,6 +26,9 @@ pub struct PublisherProfile {
     pub content_index_contract_id: String,
     pub updated_at: u64,
     /// Ed25519 signature over the state with `signature` zeroed.
+    /// serde's built-in array support only covers lengths 0-32, so this
+    /// 64-byte signature needs `BigArray`.
+    #[serde(with = "BigArray")]
     pub signature: [u8; 64],
 }
 
