@@ -53,6 +53,18 @@ on-demand per visitor. Instead:
   `cargo run --release --bin snapshot-latest-feed > ../website/public/data/latest-feed.json`
   against a real reachable Freenet node, then commit the file.
 
+## Release gate
+
+`IsReleased` env var (`lib/config.ts`'s `IS_RELEASED`, `=== "true"` check -
+any other value, including unset, is treated as `false` and fails closed)
+gates every download button on the site (`app/page.tsx`'s hero CTA,
+`app/download/page.tsx`'s two file buttons). While `false`, those render a
+"Coming soon!" message instead of a link - the actual files under
+`public/downloads/` still exist and are technically reachable by direct
+URL, this is a UI-level gate, not real access control. Flip it in Vercel's
+project settings (Environment Variables) when actually ready to launch; see
+`.env.example` for local testing (copy to `.env.local`, gitignored).
+
 ## Deploying
 
 The user connects this repo's GitHub remote to a Vercel project themselves

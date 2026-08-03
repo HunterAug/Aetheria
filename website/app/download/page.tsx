@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { IS_RELEASED } from "@/lib/config";
 
 export const metadata: Metadata = {
   title: "Download — Aetheria",
@@ -15,89 +16,107 @@ export default function Download() {
         Version {VERSION} · Windows 10/11, 64-bit
       </p>
 
-      <div className="mt-10 grid sm:grid-cols-2 gap-6">
-        <div className="rounded-xl border border-ink-700 bg-ink-900 p-6 flex flex-col">
-          <h2 className="text-lg font-semibold text-neutral-100">Full Setup</h2>
-          <p className="text-sm text-neutral-400 mt-2 flex-1 leading-relaxed">
-            The one most people want. Installs Aetheria and a bundled Freenet
-            node together — nothing else to set up first.
-          </p>
-          <a
-            href="/downloads/Aetheria-Setup-x64.exe"
-            className="mt-5 rounded-lg aetheria-gradient text-white text-sm font-semibold px-5 py-2.5 text-center shadow-lg shadow-aeblue-600/20 hover:brightness-110 transition"
-          >
-            Download Aetheria-Setup-x64.exe
-          </a>
-          <p className="text-xs text-neutral-600 mt-2">≈ 18 MB</p>
-        </div>
+      {IS_RELEASED ? (
+        <div className="mt-10 grid sm:grid-cols-2 gap-6">
+          <div className="rounded-xl border border-ink-700 bg-ink-900 p-6 flex flex-col">
+            <h2 className="text-lg font-semibold text-neutral-100">Full Setup</h2>
+            <p className="text-sm text-neutral-400 mt-2 flex-1 leading-relaxed">
+              The one most people want. Installs Aetheria and a bundled
+              Freenet node together — nothing else to set up first.
+            </p>
+            <a
+              href="/downloads/Aetheria-Setup-x64.exe"
+              className="mt-5 rounded-lg aetheria-gradient text-white text-sm font-semibold px-5 py-2.5 text-center shadow-lg shadow-aeblue-600/20 hover:brightness-110 transition"
+            >
+              Download Aetheria-Setup-x64.exe
+            </a>
+            <p className="text-xs text-neutral-600 mt-2">≈ 18 MB</p>
+          </div>
 
-        <div className="rounded-xl border border-ink-700 bg-ink-900 p-6 flex flex-col">
-          <h2 className="text-lg font-semibold text-neutral-100">App Only</h2>
-          <p className="text-sm text-neutral-400 mt-2 flex-1 leading-relaxed">
-            For people who already have their own Freenet node running.
-            Just the Aetheria app and its local delegate, no bundled node,
-            no installer — unzip and run.
-          </p>
-          <a
-            href="/downloads/Aetheria-app-only-x64.zip"
-            className="mt-5 rounded-lg border border-ink-700 text-neutral-200 text-sm font-semibold px-5 py-2.5 text-center hover:bg-ink-800 transition"
-          >
-            Download Aetheria-app-only-x64.zip
-          </a>
-          <p className="text-xs text-neutral-600 mt-2">≈ 9 MB</p>
+          <div className="rounded-xl border border-ink-700 bg-ink-900 p-6 flex flex-col">
+            <h2 className="text-lg font-semibold text-neutral-100">App Only</h2>
+            <p className="text-sm text-neutral-400 mt-2 flex-1 leading-relaxed">
+              For people who already have their own Freenet node running.
+              Just the Aetheria app and its local delegate, no bundled node,
+              no installer — unzip and run.
+            </p>
+            <a
+              href="/downloads/Aetheria-app-only-x64.zip"
+              className="mt-5 rounded-lg border border-ink-700 text-neutral-200 text-sm font-semibold px-5 py-2.5 text-center hover:bg-ink-800 transition"
+            >
+              Download Aetheria-app-only-x64.zip
+            </a>
+            <p className="text-xs text-neutral-600 mt-2">≈ 9 MB</p>
+          </div>
         </div>
-      </div>
+      ) : (
+        <div className="mt-10 rounded-xl border border-ink-700 bg-ink-900 p-10 text-center">
+          <p className="text-2xl font-semibold text-neutral-100">Coming soon!</p>
+          <p className="mt-3 text-sm text-neutral-400 max-w-md mx-auto leading-relaxed">
+            Aetheria isn&apos;t available to download quite yet. Check back
+            soon, or read the{" "}
+            <a href="/docs" className="text-aeblue-400 hover:underline">
+              docs
+            </a>{" "}
+            to see how it&apos;ll work in the meantime.
+          </p>
+        </div>
+      )}
+
+      {IS_RELEASED && (
+        <section className="mt-14 space-y-8">
+          <div>
+            <h2 className="text-lg font-semibold text-neutral-100">
+              Installing (Full Setup)
+            </h2>
+            <ol className="mt-3 space-y-2 text-sm text-neutral-400 list-decimal list-inside">
+              <li>Run the downloaded .exe.</li>
+              <li>
+                <strong className="text-neutral-300">
+                  Windows will probably show a &quot;Windows protected your
+                  PC&quot; warning.
+                </strong>{" "}
+                This is normal for a small open-source app without an
+                expensive code-signing certificate — click{" "}
+                <strong className="text-neutral-300">More info</strong>, then{" "}
+                <strong className="text-neutral-300">Run anyway</strong>.
+              </li>
+              <li>
+                Windows Defender Firewall may ask to allow the bundled
+                Freenet node to communicate — allow it, or peer connectivity
+                may be limited.
+              </li>
+              <li>
+                First launch creates a new, passphrase-protected identity.{" "}
+                <strong className="text-neutral-300">
+                  Write your passphrase down somewhere safe
+                </strong>{" "}
+                — there is no recovery option if you lose it (see{" "}
+                <a href="/docs/security" className="text-aeblue-400 hover:underline">
+                  Security &amp; your passphrase
+                </a>
+                ).
+              </li>
+            </ol>
+          </div>
+
+          <div>
+            <h2 className="text-lg font-semibold text-neutral-100">
+              Reinstalling or upgrading?
+            </h2>
+            <p className="mt-3 text-sm text-neutral-400 leading-relaxed">
+              Uninstall the old version first (Settings → Apps, or run{" "}
+              <code className="text-aecyan-400">uninstall.exe</code> from the
+              install folder) before running a new installer over it. Your
+              identity and posts aren&apos;t stored in the install folder, so
+              they aren&apos;t affected by uninstalling — only the app itself
+              is removed.
+            </p>
+          </div>
+        </section>
+      )}
 
       <section className="mt-14 space-y-8">
-        <div>
-          <h2 className="text-lg font-semibold text-neutral-100">
-            Installing (Full Setup)
-          </h2>
-          <ol className="mt-3 space-y-2 text-sm text-neutral-400 list-decimal list-inside">
-            <li>Run the downloaded .exe.</li>
-            <li>
-              <strong className="text-neutral-300">
-                Windows will probably show a &quot;Windows protected your PC&quot;
-                warning.
-              </strong>{" "}
-              This is normal for a small open-source app without an
-              expensive code-signing certificate — click{" "}
-              <strong className="text-neutral-300">More info</strong>, then{" "}
-              <strong className="text-neutral-300">Run anyway</strong>.
-            </li>
-            <li>
-              Windows Defender Firewall may ask to allow the bundled Freenet
-              node to communicate — allow it, or peer connectivity may be
-              limited.
-            </li>
-            <li>
-              First launch creates a new, passphrase-protected identity.{" "}
-              <strong className="text-neutral-300">
-                Write your passphrase down somewhere safe
-              </strong>{" "}
-              — there is no recovery option if you lose it (see{" "}
-              <a href="/docs/security" className="text-aeblue-400 hover:underline">
-                Security &amp; your passphrase
-              </a>
-              ).
-            </li>
-          </ol>
-        </div>
-
-        <div>
-          <h2 className="text-lg font-semibold text-neutral-100">
-            Reinstalling or upgrading?
-          </h2>
-          <p className="mt-3 text-sm text-neutral-400 leading-relaxed">
-            Uninstall the old version first (Settings → Apps, or run{" "}
-            <code className="text-aecyan-400">uninstall.exe</code> from the
-            install folder) before running a new installer over it. Your
-            identity and posts aren&apos;t stored in the install folder, so
-            they aren&apos;t affected by uninstalling — only the app itself is
-            removed.
-          </p>
-        </div>
-
         <div>
           <h2 className="text-lg font-semibold text-neutral-100">
             System requirements

@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { IS_RELEASED } from "@/lib/config";
 
 const FEATURES = [
   {
@@ -35,12 +36,21 @@ export default function Home() {
           stands between you and your readers.
         </p>
         <div className="mt-8 flex items-center justify-center gap-4">
-          <Link
-            href="/download"
-            className="rounded-lg aetheria-gradient text-white text-sm font-semibold px-6 py-3 shadow-lg shadow-aeblue-600/20 hover:brightness-110 transition"
-          >
-            Download for Windows
-          </Link>
+          {IS_RELEASED ? (
+            <Link
+              href="/download"
+              className="rounded-lg aetheria-gradient text-white text-sm font-semibold px-6 py-3 shadow-lg shadow-aeblue-600/20 hover:brightness-110 transition"
+            >
+              Download for Windows
+            </Link>
+          ) : (
+            <span
+              aria-disabled="true"
+              className="rounded-lg border border-ink-700 text-sm font-semibold px-6 py-3 text-neutral-500 cursor-not-allowed select-none"
+            >
+              Coming soon!
+            </span>
+          )}
           <Link
             href="/docs"
             className="rounded-lg border border-ink-700 text-sm font-semibold px-6 py-3 text-neutral-300 hover:bg-ink-900 transition"
