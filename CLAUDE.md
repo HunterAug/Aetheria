@@ -513,6 +513,102 @@ honestly rather than silently swallowed either way.
     `platform_fee_synced: true`, `platform_fee_error: null`, main
     subscription unaffected.
 
+## Following other publishers + merged Home/Following feeds (as of 2026-08-02)
+
+A reader can now follow another publisher by pasting their Ed25519
+`author_pubkey` (hex) and see a real merged feed of "your own posts + every
+followed publisher's posts", sorted by recency. This works with **no
+discovery service at all** - the same pure-local-hash trick
+`subscriber_registry_key_for` already used (see that function's module docs
+in `contracts.rs`): `ContractKey::from_params_and_code(params, code)` is a
+deterministic hash of `(compiled contract code, Parameters)`, so any delegate
+holding the same compiled `PublisherProfileContract`/`ContentIndexContract`
+WASM and a publisher's `author_pubkey` can independently derive that
+publisher's exact contract keys and `FreenetBridge::get_state` them directly.
+
+- **New `contracts.rs` functions** (all read-only, network-only, no local DB
+  dependency - same style as `fetch_key_bundle`): `fetch_remote_profile`
+  fetches and *verifies* (Ed25519 `verify_strict` against the header's own
+  `author_pubkey`) a remote `PublisherProfileContract` before returning
+  anything, so a caller never saves a follow for an unverified/tampered
+  profile; `fetch_remote_posts` fetches a remote `ContentIndexContract` and
+  drops (logs, doesn't fail the whole fetch) any individual
+  `PostMetadataHeader` whose signature doesn't check out; `fetch_remote_post_payload`
+  fetches a specific `PostDataContract` instance by its encoded contract id.
+- **Parsing an encoded contract id back into something `FreenetBridge::get_state`
+  accepts**: `freenet_stdlib::prelude::ContractInstanceId::from_base58(&str)`
+  (found by reading `freenet-stdlib-0.8.5`'s own
+  `src/contract_interface/key.rs` in the cargo registry cache, the same
+  research method used for the WebSocket URL/encoding issues earlier in this
+  file) - the exact inverse of `ContractKey::encoded_contract_id()`, which
+  every other write path in `contracts.rs` already produces. Notably,
+  `FreenetBridge::get_state` only ever needs a `ContractInstanceId`, never
+  the full `ContractKey` (code hash included) - so no code hash needs to be
+  recovered to GET a remote post by id, only to construct a key for PUT/UPDATE
+  (which a reader never does for someone else's contract anyway). The crate
+  also exposes a now-deprecated `from_bytes` alias and a `FromStr`/`TryFrom<String>`
+  impl that both delegate to `from_base58` - the source's own doc comments
+  warn at length that this parses base58 *text*, not raw 32-byte ids (a
+  previously-real bug elsewhere in the ecosystem confused the two).
+- **New SQLite table** `followed_publishers` (`db.rs`): `author_pubkey BLOB
+  PRIMARY KEY`, cached `display_name`/`avatar_freenet_key` for fast
+  rendering, `followed_at`. A brand-new table (like `profile`), so a plain
+  `CREATE TABLE IF NOT EXISTS` was enough - no `ALTER TABLE` migration guard
+  needed. `follow_publisher` upserts (re-following refreshes the cached
+  name), `unfollow_publisher` deletes, `list_followed_publishers` reads all,
+  ordered most-recently-followed first.
+- **New IPC ops** (`ipc.rs`): `follow_publisher { author_pubkey }` (hex) -
+  calls `fetch_remote_profile` first and fails clearly if nothing is found
+  (or if `author_pubkey` is this delegate's own - "you're already in your
+  own Home feed"), only then saves; `unfollow_publisher { author_pubkey }`;
+  `list_followed_publishers` (local-only, no network call);
+  `get_home_feed` (this delegate's own posts, from local SQLite, merged with
+  every followed publisher's posts, fetched live and best-effort per
+  publisher - one followed publisher's fetch failing is logged and skipped,
+  not treated as a reason to fail the whole feed, same "real gateway network
+  is flaky, don't propagate that as a hard error" philosophy as everywhere
+  else in this file - sorted by `published_at` descending);
+  `get_following_feed` (same merge, followed-only, backs the Following tab);
+  `get_remote_post { post_contract_id }` (opens a `Public` post from another
+  publisher - refuses, with a clear error, if the fetched payload's nonce
+  turns out to be non-zero, i.e. it was actually `SubscriberOnly` all along;
+  re-checks independently rather than trusting the caller's claim).
+- **Frontend**: a new "Following" tab (`app/src/components/Following.tsx`) -
+  paste-a-pubkey input (there's no directory to browse, per design), list of
+  followed publishers with Unfollow, and the followed-only feed below it.
+  `ReaderFeed.tsx`'s Home view now renders `get_home_feed`'s merged feed
+  instead of just local posts. Both feeds share `FeedItemsList.tsx` (per-card
+  author name/avatar-initial/timestamp/locked-badge rendering) and
+  `OpenedPostView.tsx` (the "reading a single post" screen) rather than
+  duplicating that chrome. A `subscriber`-access post from someone *other*
+  than this delegate renders with a lock icon and a disabled open button
+  (see the gap below for why) - from this delegate's own identity, the same
+  access level renders as a normal openable "Subscriber" badge, unchanged
+  from before.
+- **Verified live, 2026-08-02**: `delegate/src/follow_publisher_e2e_test.rs`
+  (same shape and rigor as `subscriber_registry_e2e_test.rs` - two genuinely
+  independent identities, `#[ignore]`d, needs a live node, run with `cargo
+  test follow_publisher_e2e -- --ignored --nocapture`) mints a second, real,
+  clearly-test-labeled publisher identity, publishes a real public post for
+  it, then as a completely independent reader identity follows it (verifying
+  the real signed profile), fetches its real post index, and recovers the
+  *exact* markdown over the real network. Independently re-confirmed with
+  `fdev -p 7509 execute get <post-contract-id>` from a separate shell (same
+  methodology as every other network-verification note in this file) - raw
+  CBOR bytes contained the literal published markdown. Also drove the entire
+  feature through the real running delegate binary and the real browser UI
+  (Vite dev server on 5173): followed that same real test-publisher pubkey
+  via the Following tab's input, confirmed their profile name and public
+  post appeared and opened correctly, confirmed their post appeared merged
+  into the Home feed sorted correctly by recency, confirmed following a
+  nonexistent pubkey and this delegate's own pubkey both fail with clear
+  in-UI error messages and save nothing, and (via a throwaway second test
+  identity publishing one `SubscriberOnly` post, followed the same way, then
+  unfollowed again afterward to avoid leaving test data in the real local
+  DB) confirmed a subscriber-only post from another publisher renders locked
+  with a disabled open button rather than attempting - and failing - a
+  decrypt.
+
 ## Known stub / unimplemented areas
 
 - `FreenetBridge::subscribe` — sends nothing, still `todo!()`
@@ -527,7 +623,27 @@ honestly rather than silently swallowed either way.
 - Real Lightning payment settlement against a funded wallet - see the NWC
   section above; everything up to and including the protocol/network layer
   is verified, real money movement is not.
-- Browsing/subscribing to a publication other than this delegate's own
-  identity - no discovery UI exists yet; see the NWC section above.
+- **Reading a `SubscriberOnly` post from a publisher other than this
+  delegate's own identity.** Decrypting it needs the ECDH shared secret,
+  which needs that publisher's **secp256k1** identity public key
+  (`identity_public_compressed()` - a completely different keypair from the
+  Ed25519 `author_pubkey` this file's Following feature derives contract keys
+  from). There is no mechanism yet for a reader to learn a stranger's
+  secp256k1 pubkey - `subscriber_registry_e2e_test.rs`'s own module docs say
+  so explicitly: in production it would arrive "via the peer-message channel
+  design doc §5.2 step 2 describes", which isn't built. Deliberately not
+  solved by this pass, and deliberately not worked around: `ipc.rs`'s
+  `get_remote_post` refuses outright (checks the fetched payload's nonce
+  independently, doesn't trust the caller) rather than attempting a decrypt
+  that can only fail, and the UI renders these posts locked with a disabled
+  open button instead of a broken "open" action. `contracts::fetch_key_bundle`
+  is real, tested, and ready for the day this channel exists; nothing calls
+  it from the Following path yet.
+- Subscribing (paying via NWC) to a publication other than this delegate's
+  own identity - Following only covers *reading*, not the NWC/ECDH-key-bundle
+  flow; that flow's own docs above already note "no browsing UI exists yet"
+  for the same underlying reason (no discovery mechanism), now narrowed
+  specifically to the subscribe-and-pay path since read-only following is
+  solved.
 - Proof-of-work spam mitigation (design doc §7) and the pinning daemon
   (§7, §8 Phase 4) are not started.

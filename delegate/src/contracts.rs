@@ -26,7 +26,7 @@
 use crate::{db::LocalStore, freenet_bridge::FreenetBridge, keys::DelegateKeys};
 use aetheria_types::{AccessTier, EncryptedKeyBundle, EncryptedPostPayload, PostMetadataHeader, Tier};
 use anyhow::{Context, Result};
-use ed25519_dalek::Signer;
+use ed25519_dalek::{Signature, Signer, VerifyingKey};
 use freenet_stdlib::prelude::{CodeHash, ContractCode, ContractInstanceId, ContractKey, Parameters};
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
@@ -571,4 +571,170 @@ pub async fn fetch_key_bundle(
         .bundles
         .into_iter()
         .find(|b| b.subscriber_pubkey == subscriber_pubkey && b.epoch_id == epoch_id))
+}
+
+// ---------------------------------------------------------------------
+// Following another publisher - reader-side discovery-free lookups.
+//
+// Every contract key in this app is `ContractKey::from_params_and_code(params,
+// code)`, a pure hash with no discovery/pointer field needed (see
+// `subscriber_registry_key_for`'s module docs above, and CLAUDE.md). The same
+// trick applies here: given nothing but a publisher's Ed25519 `author_pubkey`
+// (the same one shown as `publisher_pubkey` in `GetSubscriptionInfo`, and the
+// one every other contract in this file already keys `Parameters` on), any
+// delegate can independently compute that publisher's `PublisherProfileContract`
+// and `ContentIndexContract` keys - the exact same keys `ensure_publisher_identity`
+// derives (and, the first time, mints) for *this* delegate's own identity.
+// ---------------------------------------------------------------------
+
+fn publisher_profile_key_for(author_pubkey: [u8; 32]) -> Result<ContractKey> {
+    let code = load_code(PUBLISHER_PROFILE_CONTRACT_WASM)?;
+    let params = Parameters::from(author_pubkey.to_vec());
+    Ok(ContractKey::from_params_and_code(&params, &*code))
+}
+
+fn content_index_key_for(author_pubkey: [u8; 32]) -> Result<ContractKey> {
+    let code = load_code(CONTENT_INDEX_CONTRACT_WASM)?;
+    let params = Parameters::from(author_pubkey.to_vec());
+    Ok(ContractKey::from_params_and_code(&params, &*code))
+}
+
+/// A remote publisher's profile, as fetched and *verified* (not merely
+/// trusted) from the real network - see `fetch_remote_profile`.
+pub struct RemoteProfile {
+    /// Redundant with the caller-supplied argument `fetch_remote_profile` was
+    /// called with (already checked equal to it before returning) - kept on
+    /// the struct anyway so a caller holding only a `RemoteProfile` (not the
+    /// original hex string) still has the pubkey to hand to
+    /// `LocalStore::follow_publisher` or similar.
+    #[allow(dead_code)]
+    pub author_pubkey: [u8; 32],
+    pub display_name: String,
+    pub bio: String,
+    pub avatar_freenet_key: Option<String>,
+}
+
+/// Fetches `author_pubkey`'s `PublisherProfileContract` off the real network
+/// (no discovery call - the key is a pure local computation, see module docs
+/// above) and checks its Ed25519 signature before returning anything -
+/// `follow_publisher` uses this to refuse saving a follow for a pubkey with
+/// no real (or tampered) profile, rather than trusting arbitrary bytes some
+/// peer handed back for that contract slot. `Ok(None)` means "no profile
+/// published at that key" (a real, distinct outcome from a network error,
+/// same convention as `FreenetBridge::get_state`); a signature mismatch is a
+/// hard error, not a `None`, since *something* did answer - it just wasn't
+/// trustworthy.
+pub async fn fetch_remote_profile(
+    freenet: &FreenetBridge,
+    author_pubkey: [u8; 32],
+) -> Result<Option<RemoteProfile>> {
+    let key = publisher_profile_key_for(author_pubkey)?;
+    let Some(bytes) = freenet
+        .get_state(*key.id())
+        .await
+        .context("fetching remote PublisherProfileContract state")?
+    else {
+        return Ok(None);
+    };
+    let profile: PublisherProfile = ciborium::from_reader(bytes.as_slice())
+        .context("decoding remote PublisherProfileContract state")?;
+    anyhow::ensure!(
+        profile.author_pubkey == author_pubkey,
+        "remote profile's author_pubkey field doesn't match the pubkey it was fetched for"
+    );
+
+    let verifying_key = VerifyingKey::from_bytes(&author_pubkey)
+        .context("author_pubkey is not a valid Ed25519 verifying key")?;
+    let signature = Signature::from_bytes(&profile.signature);
+    verifying_key
+        .verify_strict(&profile.signable_bytes(), &signature)
+        .context("remote PublisherProfileContract signature verification failed - refusing to trust it")?;
+
+    Ok(Some(RemoteProfile {
+        author_pubkey,
+        display_name: profile.title,
+        bio: profile.description,
+        avatar_freenet_key: profile.avatar_freenet_key,
+    }))
+}
+
+/// Fetches `author_pubkey`'s `ContentIndexContract` post list off the real
+/// network. `Ok(vec![])` covers both "no index published yet" and "published
+/// but empty" - neither is an error, both mean "nothing to show from them
+/// right now". Each returned header's signature is checked against
+/// `author_pubkey`; a header that fails verification is dropped (logged, not
+/// propagated as a hard error) rather than failing the whole fetch - one bad
+/// or tampered entry in someone else's index shouldn't hide every other real
+/// post of theirs.
+pub async fn fetch_remote_posts(
+    freenet: &FreenetBridge,
+    author_pubkey: [u8; 32],
+) -> Result<Vec<PostMetadataHeader>> {
+    let key = content_index_key_for(author_pubkey)?;
+    let Some(bytes) = freenet
+        .get_state(*key.id())
+        .await
+        .context("fetching remote ContentIndexContract state")?
+    else {
+        return Ok(Vec::new());
+    };
+    let state: ContentIndexState = ciborium::from_reader(bytes.as_slice())
+        .context("decoding remote ContentIndexContract state")?;
+
+    let verifying_key = VerifyingKey::from_bytes(&author_pubkey)
+        .context("author_pubkey is not a valid Ed25519 verifying key")?;
+    Ok(state
+        .posts
+        .into_iter()
+        .filter(|header| {
+            let signature = Signature::from_bytes(&header.signature);
+            let ok = verifying_key
+                .verify_strict(&header_signable_bytes(header), &signature)
+                .is_ok();
+            if !ok {
+                tracing::warn!(
+                    post_id = %hex_encode(&header.post_id),
+                    author_pubkey = %hex_encode(&author_pubkey),
+                    "dropping remote post header with an invalid signature"
+                );
+            }
+            ok
+        })
+        .collect())
+}
+
+/// Fetches a specific `PostDataContract` instance's raw payload by its
+/// encoded (base58) contract id - the exact string `PostMetadataHeader::post_contract_id`
+/// stores and `ContractKey::encoded_contract_id` produces elsewhere in this
+/// file. `ContractInstanceId::from_base58` (found in `freenet_stdlib::prelude`
+/// via the crate's own source under `contract_interface/key.rs` - the
+/// `Display`/`encode` half of this round trip is what `encoded_contract_id`
+/// already used) is the inverse of that encoding; `FreenetBridge::get_state`
+/// only ever needs the instance id, not the full `ContractKey` (code hash
+/// included), for a GET, so no code hash needs to be recovered here at all.
+///
+/// Deliberately does not attempt decryption - a `SubscriberOnly` post's
+/// `cipher_text` here is genuine AES-256-GCM ciphertext this delegate has no
+/// way to unwrap for someone else's publication (see CLAUDE.md's "Known
+/// stub" section on ECDH discovery for other publishers). Callers must check
+/// `PostMetadataHeader::access_level` themselves before calling this for
+/// content they intend to render as plaintext; a `Public` post's `cipher_text`
+/// is the literal markdown bytes with an all-zero nonce, per this app's
+/// existing convention (see `publish_post_to_network`).
+pub async fn fetch_remote_post_payload(
+    freenet: &FreenetBridge,
+    post_contract_id: &str,
+) -> Result<EncryptedPostPayload> {
+    let instance_id = ContractInstanceId::from_base58(post_contract_id)
+        .map_err(|e| anyhow::anyhow!("decoding post_contract_id {post_contract_id:?}: {e}"))?;
+    let bytes = freenet
+        .get_state(instance_id)
+        .await
+        .context("fetching remote PostDataContract state")?
+        .ok_or_else(|| anyhow::anyhow!("post contract not found on the network"))?;
+    ciborium::from_reader(bytes.as_slice()).context("decoding remote EncryptedPostPayload")
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }

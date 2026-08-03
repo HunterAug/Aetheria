@@ -85,3 +85,23 @@ export function PlusIcon({ className }: IconProps) {
     </svg>
   );
 }
+
+export function FollowingIcon({ className }: IconProps) {
+  return (
+    <svg {...base} className={className}>
+      <circle cx="9" cy="8.5" r="3.25" />
+      <path d="M3 20c0-3.4 2.7-6 6-6s6 2.6 6 6" />
+      <path d="M17.5 7.5v5" />
+      <path d="M15 10h5" />
+    </svg>
+  );
+}
+
+export function LockIcon({ className }: IconProps) {
+  return (
+    <svg {...base} className={className}>
+      <rect x="5" y="11" width="14" height="9" rx="2" />
+      <path d="M8 11V7.5a4 4 0 0 1 8 0V11" />
+    </svg>
+  );
+}

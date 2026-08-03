@@ -75,6 +75,22 @@ pub struct SubscriberRow {
     pub issued_at: u64,
 }
 
+/// A publisher this delegate has chosen to follow (see `contracts::fetch_remote_profile`
+/// for how `display_name`/`avatar_freenet_key` were validated at follow time).
+/// Cached locally so the Following tab and the merged Home feed render fast
+/// without a network round trip just to show a name - the actual post list
+/// still comes from a live fetch (see `contracts::fetch_remote_posts`), only
+/// the publisher's identity/display metadata is cached here.
+pub struct FollowedPublisherRow {
+    /// Ed25519 master signing pubkey - same identity `ensure_publisher_identity`
+    /// keys `content_index`/`publisher_profile` on for this delegate's own
+    /// identity.
+    pub author_pubkey: [u8; 32],
+    pub display_name: String,
+    pub avatar_freenet_key: Option<String>,
+    pub followed_at: u64,
+}
+
 impl LocalStore {
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)?;
@@ -120,12 +136,19 @@ impl LocalStore {
                 avatar_mime   TEXT,
                 updated_at    INTEGER NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS followed_publishers (
+                author_pubkey      BLOB PRIMARY KEY,
+                display_name       TEXT NOT NULL,
+                avatar_freenet_key TEXT,
+                followed_at        INTEGER NOT NULL
+            );
             "#,
         )?;
-        // `profile` is a brand-new table (no existing on-disk DB predates
-        // it), so plain `CREATE TABLE IF NOT EXISTS` above is enough - unlike
-        // `post_contract_id` below, there's no pre-existing schema shape to
-        // guard against.
+        // `profile`/`followed_publishers` are brand-new tables (no existing
+        // on-disk DB predates them), so plain `CREATE TABLE IF NOT EXISTS`
+        // above is enough - unlike `post_contract_id` below, there's no
+        // pre-existing schema shape to guard against.
 
         // `CREATE TABLE IF NOT EXISTS` above is a no-op against a `posts`
         // table that already existed on disk from before this column was
@@ -395,6 +418,61 @@ impl LocalStore {
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
     }
 
+    /// Records (or re-confirms) that this delegate follows `author_pubkey` -
+    /// called only after `contracts::fetch_remote_profile` has verified a
+    /// real, signed `PublisherProfileContract` exists at that pubkey (see
+    /// `ipc.rs::handle_follow_publisher`), never for an unvalidated pubkey a
+    /// user merely typed in. Upserts on re-follow so refreshing an existing
+    /// follow's cached name/avatar doesn't require a separate code path.
+    pub fn follow_publisher(
+        &self,
+        author_pubkey: &[u8; 32],
+        display_name: &str,
+        avatar_freenet_key: Option<&str>,
+        followed_at: u64,
+    ) -> Result<()> {
+        self.conn.lock().expect("db mutex poisoned").execute(
+            "INSERT INTO followed_publishers (author_pubkey, display_name, avatar_freenet_key, followed_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(author_pubkey) DO UPDATE SET
+                display_name = excluded.display_name,
+                avatar_freenet_key = excluded.avatar_freenet_key,
+                followed_at = excluded.followed_at",
+            params![author_pubkey.as_slice(), display_name, avatar_freenet_key, followed_at as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn unfollow_publisher(&self, author_pubkey: &[u8; 32]) -> Result<()> {
+        self.conn.lock().expect("db mutex poisoned").execute(
+            "DELETE FROM followed_publishers WHERE author_pubkey = ?1",
+            params![author_pubkey.as_slice()],
+        )?;
+        Ok(())
+    }
+
+    /// Followed publishers, most recently followed first - the Following
+    /// tab's list and the set of publishers `ipc.rs`'s feed handlers fan out
+    /// remote fetches to.
+    pub fn list_followed_publishers(&self) -> Result<Vec<FollowedPublisherRow>> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT author_pubkey, display_name, avatar_freenet_key, followed_at
+             FROM followed_publishers ORDER BY followed_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let author_pubkey: Vec<u8> = row.get(0)?;
+            let followed_at: i64 = row.get(3)?;
+            Ok(FollowedPublisherRow {
+                author_pubkey: author_pubkey.try_into().unwrap_or([0u8; 32]),
+                display_name: row.get(1)?,
+                avatar_freenet_key: row.get(2)?,
+                followed_at: followed_at as u64,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
     pub fn get_epoch_key(&self, epoch_id: u32) -> Result<Option<[u8; 32]>> {
         self.conn
             .lock()
@@ -481,6 +559,41 @@ mod tests {
         assert_eq!(row.display_name, "Second Name");
         assert_eq!(row.bio, "second bio");
         assert_eq!(row.updated_at, 2);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn follow_then_list_then_unfollow_round_trips() {
+        let (db, dir) = open_temp();
+        let pubkey = [7u8; 32];
+        db.follow_publisher(&pubkey, "Some Writer", Some("abc123"), 1_700_000_000)
+            .unwrap();
+
+        let rows = db.list_followed_publishers().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].author_pubkey, pubkey);
+        assert_eq!(rows[0].display_name, "Some Writer");
+        assert_eq!(rows[0].avatar_freenet_key.as_deref(), Some("abc123"));
+
+        db.unfollow_publisher(&pubkey).unwrap();
+        assert!(db.list_followed_publishers().unwrap().is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn follow_publisher_upserts_rather_than_duplicating() {
+        let (db, dir) = open_temp();
+        let pubkey = [9u8; 32];
+        db.follow_publisher(&pubkey, "First Name", None, 1).unwrap();
+        db.follow_publisher(&pubkey, "Updated Name", Some("key1"), 2)
+            .unwrap();
+
+        let rows = db.list_followed_publishers().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].display_name, "Updated Name");
+        assert_eq!(rows[0].avatar_freenet_key.as_deref(), Some("key1"));
 
         std::fs::remove_dir_all(&dir).ok();
     }

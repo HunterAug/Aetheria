@@ -74,6 +74,34 @@ enum Request {
     /// from the local bookkeeping table (`LocalStore::record_subscriber`) -
     /// not a live network re-fetch of the registry contract.
     ListSubscribers,
+    /// Reader-role action: fetches `author_pubkey`'s real, signed
+    /// `PublisherProfileContract` off the network to validate they actually
+    /// exist before saving anything locally (see
+    /// `contracts::fetch_remote_profile`) - fails clearly rather than
+    /// blindly following an unverified pubkey.
+    FollowPublisher {
+        /// Hex-encoded 32-byte Ed25519 master signing pubkey.
+        author_pubkey: String,
+    },
+    UnfollowPublisher {
+        author_pubkey: String,
+    },
+    /// Locally-cached list of followed publishers - no network call.
+    ListFollowedPublishers,
+    /// This delegate's own posts merged with every followed publisher's
+    /// posts, sorted by `published_at` descending.
+    GetHomeFeed,
+    /// Same merge, but followed publishers only (no own posts) - backs the
+    /// Following tab.
+    GetFollowingFeed,
+    /// Fetches and decodes a `Public` post from *another* publisher by its
+    /// `PostDataContract` id. Refuses (rather than silently failing to
+    /// decrypt) if the fetched payload turns out to be `SubscriberOnly` -
+    /// see `contracts::fetch_remote_post_payload`'s module docs on why that
+    /// gap is deliberate for this milestone.
+    GetRemotePost {
+        post_contract_id: String,
+    },
 }
 
 #[derive(Deserialize)]
@@ -181,6 +209,18 @@ async fn handle_message(delegate: &Arc<Mutex<Delegate>>, text: &str) -> String {
         Request::GetSubscriptionInfo => handle_get_subscription_info(&d),
         Request::Subscribe { tier_id } => handle_subscribe(&d, tier_id).await,
         Request::ListSubscribers => handle_list_subscribers(&d),
+        Request::FollowPublisher { author_pubkey } => {
+            handle_follow_publisher(&d, &author_pubkey).await
+        }
+        Request::UnfollowPublisher { author_pubkey } => {
+            handle_unfollow_publisher(&d, &author_pubkey)
+        }
+        Request::ListFollowedPublishers => handle_list_followed_publishers(&d),
+        Request::GetHomeFeed => handle_get_home_feed(&d).await,
+        Request::GetFollowingFeed => handle_get_following_feed(&d).await,
+        Request::GetRemotePost { post_contract_id } => {
+            handle_get_remote_post(&d, &post_contract_id).await
+        }
     };
 
     let response = match outcome {
@@ -700,6 +740,215 @@ fn handle_list_subscribers(delegate: &Delegate) -> Result<serde_json::Value> {
         })
         .collect();
     Ok(serde_json::json!(json))
+}
+
+/// Fetches and verifies `author_pubkey_hex`'s real `PublisherProfileContract`
+/// before saving anything - `contracts::fetch_remote_profile` refuses to
+/// return a profile whose signature doesn't check out, so a successful
+/// return here means a real, self-consistent publisher was found. Fails
+/// clearly (rather than saving an unverified pubkey) if none exists yet.
+async fn handle_follow_publisher(
+    delegate: &Delegate,
+    author_pubkey_hex: &str,
+) -> Result<serde_json::Value> {
+    let author_pubkey: [u8; 32] = hex::decode_array(author_pubkey_hex)?;
+    anyhow::ensure!(
+        author_pubkey != delegate.keys.master_signing_verifying_bytes(),
+        "that's your own publication - you're already in your own Home feed"
+    );
+
+    let profile = contracts::fetch_remote_profile(&delegate.freenet, author_pubkey)
+        .await
+        .context("looking up that publisher's profile on the network")?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no publisher profile found for that pubkey - double check it's correct and \
+                 that publisher has actually published something"
+            )
+        })?;
+
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    // Same blank-title fallback `ReaderFeed.tsx`/`ensure_publisher_identity`
+    // already use for this delegate's own identity - a freshly-created
+    // publisher with no title set yet shouldn't render as an empty name.
+    let display_name = if profile.display_name.trim().is_empty() {
+        "Untitled Publication".to_string()
+    } else {
+        profile.display_name.clone()
+    };
+    delegate.db.follow_publisher(
+        &author_pubkey,
+        &display_name,
+        profile.avatar_freenet_key.as_deref(),
+        now,
+    )?;
+
+    Ok(serde_json::json!({
+        "author_pubkey": author_pubkey_hex,
+        "display_name": display_name,
+        "bio": profile.bio,
+        "avatar_freenet_key": profile.avatar_freenet_key,
+        "followed_at": now,
+    }))
+}
+
+fn handle_unfollow_publisher(delegate: &Delegate, author_pubkey_hex: &str) -> Result<serde_json::Value> {
+    let author_pubkey: [u8; 32] = hex::decode_array(author_pubkey_hex)?;
+    delegate.db.unfollow_publisher(&author_pubkey)?;
+    Ok(serde_json::json!({ "author_pubkey": author_pubkey_hex }))
+}
+
+fn handle_list_followed_publishers(delegate: &Delegate) -> Result<serde_json::Value> {
+    let rows = delegate.db.list_followed_publishers()?;
+    let json: Vec<_> = rows
+        .into_iter()
+        .map(|r| {
+            serde_json::json!({
+                "author_pubkey": hex::encode(r.author_pubkey),
+                "display_name": r.display_name,
+                "avatar_freenet_key": r.avatar_freenet_key,
+                "followed_at": r.followed_at,
+            })
+        })
+        .collect();
+    Ok(serde_json::json!(json))
+}
+
+/// This delegate's own posts, shaped as feed items - `is_own: true`,
+/// `locked: false` always (a publisher can always read their own posts, see
+/// `handle_get_post`).
+fn own_feed_items(delegate: &Delegate) -> Result<Vec<serde_json::Value>> {
+    let display_name = delegate
+        .db
+        .get_profile()?
+        .map(|p| p.display_name)
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "Untitled Publication".to_string());
+    let author_pubkey = hex::encode(delegate.keys.master_signing_verifying_bytes());
+
+    Ok(delegate
+        .db
+        .list_posts()?
+        .into_iter()
+        .map(|p| {
+            serde_json::json!({
+                "post_id": hex::encode(p.post_id),
+                "title": p.title,
+                "summary": p.summary,
+                "access_level": p.access_level,
+                "epoch_id": p.epoch_id,
+                "published_at": p.published_at,
+                "author_pubkey": author_pubkey,
+                "author_display_name": display_name,
+                "is_own": true,
+                "locked": false,
+                "post_contract_id": p.post_contract_id,
+            })
+        })
+        .collect())
+}
+
+/// Every followed publisher's posts, fetched live from the network -
+/// best-effort per publisher: a fetch failure for one followed publisher
+/// (the real gateway network is known to be flaky, see CLAUDE.md) is logged
+/// and that publisher is skipped for this refresh, not treated as a reason
+/// to fail the whole feed for every other publisher.
+async fn followed_feed_items(delegate: &Delegate) -> Vec<serde_json::Value> {
+    let followed = match delegate.db.list_followed_publishers() {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(error = %e, "reading followed publishers from local db failed");
+            return Vec::new();
+        }
+    };
+
+    let mut items = Vec::new();
+    for f in followed {
+        match contracts::fetch_remote_posts(&delegate.freenet, f.author_pubkey).await {
+            Ok(posts) => {
+                for header in posts {
+                    let (access_level, locked) = match header.access_level {
+                        aetheria_types::AccessTier::Public => ("public", false),
+                        // Can't decrypt someone else's subscriber-only post
+                        // without their ECDH key (no discovery mechanism
+                        // exists yet, see CLAUDE.md) - still shown, title/
+                        // summary are unencrypted metadata either way, but
+                        // flagged so the UI can render it locked rather than
+                        // let a click attempt a decrypt that can only fail.
+                        aetheria_types::AccessTier::SubscriberOnly { .. } => ("subscriber", true),
+                    };
+                    items.push(serde_json::json!({
+                        "post_id": hex::encode(header.post_id),
+                        "title": header.title,
+                        "summary": header.summary,
+                        "access_level": access_level,
+                        "epoch_id": header.epoch_id,
+                        "published_at": header.published_at,
+                        "author_pubkey": hex::encode(f.author_pubkey),
+                        "author_display_name": f.display_name,
+                        "is_own": false,
+                        "locked": locked,
+                        "post_contract_id": header.post_contract_id,
+                    }));
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    author_pubkey = %hex::encode(f.author_pubkey),
+                    error = %e,
+                    "fetching a followed publisher's posts failed - skipping them this refresh"
+                );
+            }
+        }
+    }
+    items
+}
+
+fn sort_feed_items_desc(items: &mut [serde_json::Value]) {
+    items.sort_by(|a, b| {
+        let pa = a["published_at"].as_u64().unwrap_or(0);
+        let pb = b["published_at"].as_u64().unwrap_or(0);
+        pb.cmp(&pa)
+    });
+}
+
+async fn handle_get_home_feed(delegate: &Delegate) -> Result<serde_json::Value> {
+    let mut items = own_feed_items(delegate)?;
+    items.extend(followed_feed_items(delegate).await);
+    sort_feed_items_desc(&mut items);
+    Ok(serde_json::json!(items))
+}
+
+async fn handle_get_following_feed(delegate: &Delegate) -> Result<serde_json::Value> {
+    let mut items = followed_feed_items(delegate).await;
+    sort_feed_items_desc(&mut items);
+    Ok(serde_json::json!(items))
+}
+
+/// Reader-role: opens a `Public` post from another publisher by its
+/// `PostDataContract` id. The feed already tells the UI which posts are
+/// `locked` (see `followed_feed_items`), but this re-checks the fetched
+/// payload's nonce independently rather than trusting the caller's claim -
+/// a `SubscriberOnly` payload's nonce is genuine random AES-256-GCM output,
+/// never all-zero (see `publish_post_to_network`'s convention), so this is a
+/// real distinguishing check, not a formality.
+async fn handle_get_remote_post(
+    delegate: &Delegate,
+    post_contract_id: &str,
+) -> Result<serde_json::Value> {
+    let payload = contracts::fetch_remote_post_payload(&delegate.freenet, post_contract_id).await?;
+    anyhow::ensure!(
+        payload.nonce == [0u8; 12],
+        "this post is subscriber-only content from another publisher and can't be opened yet - \
+         there's no mechanism yet for a reader to learn a stranger's ECDH key (see CLAUDE.md's \
+         Known stub section)"
+    );
+    let markdown = String::from_utf8(payload.cipher_text)
+        .context("decoding remote public post payload as UTF-8 markdown")?;
+    Ok(serde_json::json!({
+        "post_contract_id": post_contract_id,
+        "markdown": markdown,
+    }))
 }
 
 /// Minimal data-URL codec (`data:<mime>;base64,<payload>`) for the profile

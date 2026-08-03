@@ -1,12 +1,8 @@
 import { useEffect, useState } from "react";
-import ReactMarkdown, { type Components } from "react-markdown";
-import remarkGfm from "remark-gfm";
-import {
-  delegate,
-  type PostDetail,
-  type PostSummary,
-  type Profile,
-} from "../lib/delegate";
+import type { Components } from "react-markdown";
+import { delegate, type FeedItem, type OpenedPost } from "../lib/delegate";
+import { FeedItemsList } from "./FeedItemsList";
+import OpenedPostView from "./OpenedPostView";
 
 export const markdownComponents: Components = {
   h1: ({ children }) => (
@@ -102,46 +98,20 @@ export const markdownComponents: Components = {
   ),
 };
 
-function relativeTime(unixSeconds: number): string {
-  const diffSec = Math.max(0, Date.now() / 1000 - unixSeconds);
-  const units: [number, string][] = [
-    [60, "s"],
-    [60, "m"],
-    [24, "h"],
-    [365, "d"],
-  ];
-  let value = diffSec;
-  let suffix = "s";
-  for (const [size, label] of units) {
-    if (value < size) {
-      suffix = label;
-      break;
-    }
-    value /= size;
-    suffix = label;
-  }
-  return `${Math.max(1, Math.floor(value))}${suffix}`;
-}
-
-function initial(name: string): string {
-  return name.trim().charAt(0).toUpperCase() || "A";
-}
-
 export default function ReaderFeed({
   onOpenProfile,
 }: {
   onOpenProfile: () => void;
 }) {
-  const [posts, setPosts] = useState<PostSummary[] | null>(null);
-  const [profile, setProfile] = useState<Profile | null>(null);
+  const [items, setItems] = useState<FeedItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [selected, setSelected] = useState<PostDetail | null>(null);
+  const [selected, setSelected] = useState<OpenedPost | null>(null);
   const [opening, setOpening] = useState<string | null>(null);
 
   async function refresh() {
     setError(null);
     try {
-      setPosts(await delegate.listPosts());
+      setItems(await delegate.getHomeFeed());
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -149,22 +119,37 @@ export default function ReaderFeed({
 
   useEffect(() => {
     refresh();
-    // The profile applies to every post (one publisher per delegate for
-    // now) - fetch it once rather than per-card. A failure here just means
-    // the feed falls back to the pre-profile initial-circle rendering.
-    delegate
-      .getProfile()
-      .then(setProfile)
-      .catch(() => {});
   }, []);
 
-  const authorName = profile?.display_name?.trim() || "Untitled Publication";
-
-  async function open(postId: string) {
-    setOpening(postId);
+  async function open(item: FeedItem) {
+    if (item.locked) return;
+    setOpening(item.post_id);
     setError(null);
     try {
-      setSelected(await delegate.getPost(postId));
+      if (item.is_own) {
+        const detail = await delegate.getPost(item.post_id);
+        setSelected({
+          post_id: detail.post_id,
+          title: detail.title,
+          markdown: detail.markdown,
+          author_pubkey: item.author_pubkey,
+          author_display_name: item.author_display_name,
+          is_own: true,
+        });
+      } else {
+        if (!item.post_contract_id) {
+          throw new Error("this post hasn't synced to the network yet - try again later");
+        }
+        const detail = await delegate.getRemotePost(item.post_contract_id);
+        setSelected({
+          post_id: item.post_id,
+          title: item.title,
+          markdown: detail.markdown,
+          author_pubkey: item.author_pubkey,
+          author_display_name: item.author_display_name,
+          is_own: false,
+        });
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -174,41 +159,11 @@ export default function ReaderFeed({
 
   if (selected) {
     return (
-      <div className="px-6 py-5 max-w-2xl mx-auto">
-        <button
-          onClick={() => setSelected(null)}
-          className="text-sm text-neutral-500 hover:text-neutral-200 mb-5"
-        >
-          ← Back to feed
-        </button>
-        <button
-          onClick={onOpenProfile}
-          className="flex items-center gap-2 mb-3 group"
-        >
-          {profile?.avatar_data_url ? (
-            <img
-              src={profile.avatar_data_url}
-              alt=""
-              className="w-7 h-7 rounded-full object-cover"
-            />
-          ) : (
-            <div className="w-7 h-7 rounded-full bg-aetheria-gradient flex items-center justify-center text-xs font-semibold text-white">
-              {initial(authorName)}
-            </div>
-          )}
-          <span className="text-sm font-semibold text-neutral-300 group-hover:underline">
-            {authorName}
-          </span>
-        </button>
-        <h2 className="text-2xl font-bold text-neutral-100 mb-4">
-          {selected.title}
-        </h2>
-        <div className="max-w-none">
-          <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-            {selected.markdown}
-          </ReactMarkdown>
-        </div>
-      </div>
+      <OpenedPostView
+        post={selected}
+        onBack={() => setSelected(null)}
+        onOpenProfile={onOpenProfile}
+      />
     );
   }
 
@@ -216,7 +171,7 @@ export default function ReaderFeed({
     <div className="max-w-2xl mx-auto">
       <div className="flex items-center justify-between px-6 py-4 border-b border-ink-800">
         <h2 className="text-base font-semibold text-neutral-100">
-          For you
+          Home
         </h2>
         <button
           onClick={refresh}
@@ -228,76 +183,19 @@ export default function ReaderFeed({
 
       {error && <p className="text-sm text-red-400 px-6 pt-4">{error}</p>}
 
-      {posts === null && !error && (
+      {items === null && !error && (
         <p className="text-sm text-neutral-500 px-6 py-8">Loading…</p>
       )}
-      {posts?.length === 0 && (
+      {items?.length === 0 && (
         <p className="text-sm text-neutral-500 px-6 py-8">
-          No posts yet — write one from the Draft tab.
+          No posts yet — write one from the Draft tab, or follow a publisher from the
+          Following tab.
         </p>
       )}
 
-      <ul className="divide-y divide-ink-800">
-        {posts?.map((post) => (
-          <li
-            key={post.post_id}
-            className="hover:bg-ink-900/60 transition-colors"
-          >
-            <div className="px-6 py-4 flex gap-3">
-              <button
-                onClick={onOpenProfile}
-                className="shrink-0"
-                title={`View ${authorName}'s profile`}
-              >
-                {profile?.avatar_data_url ? (
-                  <img
-                    src={profile.avatar_data_url}
-                    alt=""
-                    className="w-9 h-9 rounded-full object-cover"
-                  />
-                ) : (
-                  <div className="w-9 h-9 rounded-full bg-aetheria-gradient flex items-center justify-center text-sm font-semibold text-white">
-                    {initial(authorName)}
-                  </div>
-                )}
-              </button>
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2 text-sm">
-                  <button
-                    onClick={onOpenProfile}
-                    className="font-semibold text-neutral-100 hover:underline"
-                  >
-                    {authorName}
-                  </button>
-                  <span className="text-neutral-500">
-                    {relativeTime(post.published_at)}
-                  </span>
-                  {post.access_level === "subscriber" && (
-                    <span className="text-xs bg-aepurple-500/15 text-aepurple-400 px-1.5 py-0.5 rounded">
-                      Subscriber
-                    </span>
-                  )}
-                  {opening === post.post_id && (
-                    <span className="text-xs text-neutral-500">opening…</span>
-                  )}
-                </div>
-                <button
-                  onClick={() => open(post.post_id)}
-                  disabled={opening === post.post_id}
-                  className="block w-full text-left"
-                >
-                  <p className="text-sm font-medium text-neutral-200 mt-0.5">
-                    {post.title}
-                  </p>
-                  <p className="text-sm text-neutral-400 mt-0.5 truncate">
-                    {post.summary}
-                  </p>
-                </button>
-              </div>
-            </div>
-          </li>
-        ))}
-      </ul>
+      {items && items.length > 0 && (
+        <FeedItemsList items={items} opening={opening} onOpen={open} />
+      )}
     </div>
   );
 }

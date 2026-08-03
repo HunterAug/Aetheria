@@ -70,6 +70,63 @@ export interface SubscriberEntry {
   issued_at: number;
 }
 
+/// One entry in the merged Home feed or the Following-only feed - a post
+/// from either this delegate's own publication or a followed publisher's
+/// `ContentIndexContract`, fetched live over the real network (see
+/// `delegate/src/ipc.rs`'s `handle_get_home_feed`/`handle_get_following_feed`).
+export interface FeedItem {
+  post_id: string;
+  title: string;
+  summary: string;
+  access_level: AccessLevel;
+  epoch_id: number;
+  published_at: number;
+  /// Hex-encoded Ed25519 pubkey of whoever published this post.
+  author_pubkey: string;
+  author_display_name: string;
+  is_own: boolean;
+  /// `true` for a `subscriber`-access post from someone *other* than this
+  /// delegate - unopenable for now, since decrypting it needs the
+  /// publisher's ECDH key and there's no way yet for a reader to discover a
+  /// stranger's secp256k1 identity key (see CLAUDE.md's "Known stub"
+  /// section). Always `false` for this delegate's own posts, subscriber or
+  /// not - the local epoch key is already available for those.
+  locked: boolean;
+  /// The post's `PostDataContract` id, or `null` if it hasn't reached the
+  /// network yet (own posts only - a remote post only ever appears here
+  /// once it's already in the fetched index, so this is always set for
+  /// `is_own: false` entries).
+  post_contract_id: string | null;
+}
+
+export interface FollowedPublisher {
+  author_pubkey: string;
+  display_name: string;
+  avatar_freenet_key: string | null;
+  followed_at: number;
+}
+
+export interface FollowResult extends FollowedPublisher {
+  bio: string;
+}
+
+export interface RemotePostDetail {
+  post_contract_id: string;
+  markdown: string;
+}
+
+/// A post that's been opened and is ready to render - the shape
+/// `ReaderFeed.tsx`/`Following.tsx` build once they have both the feed
+/// item's metadata (title, author) and the fetched markdown body.
+export interface OpenedPost {
+  post_id: string;
+  title: string;
+  markdown: string;
+  author_pubkey: string;
+  author_display_name: string;
+  is_own: boolean;
+}
+
 interface PendingEntry {
   resolve: (value: unknown) => void;
   reject: (reason: unknown) => void;
@@ -177,6 +234,40 @@ class DelegateClient {
 
   listSubscribers(): Promise<SubscriberEntry[]> {
     return this.call("list_subscribers");
+  }
+
+  /// Fetches and verifies `authorPubkey`'s real `PublisherProfileContract`
+  /// over the network before saving anything locally - rejects with a clear
+  /// error if no such publisher exists rather than blindly saving an
+  /// unverified pubkey.
+  followPublisher(authorPubkey: string): Promise<FollowResult> {
+    return this.call("follow_publisher", { author_pubkey: authorPubkey });
+  }
+
+  unfollowPublisher(authorPubkey: string): Promise<{ author_pubkey: string }> {
+    return this.call("unfollow_publisher", { author_pubkey: authorPubkey });
+  }
+
+  listFollowedPublishers(): Promise<FollowedPublisher[]> {
+    return this.call("list_followed_publishers");
+  }
+
+  /// This delegate's own posts merged with every followed publisher's posts,
+  /// sorted by recency.
+  getHomeFeed(): Promise<FeedItem[]> {
+    return this.call("get_home_feed");
+  }
+
+  /// Followed publishers' posts only - backs the Following tab.
+  getFollowingFeed(): Promise<FeedItem[]> {
+    return this.call("get_following_feed");
+  }
+
+  /// Opens a `public`-access post from another publisher. Throws if the
+  /// fetched post turns out to be subscriber-only - check `FeedItem.locked`
+  /// first and don't call this for a locked item.
+  getRemotePost(postContractId: string): Promise<RemotePostDetail> {
+    return this.call("get_remote_post", { post_contract_id: postContractId });
   }
 }
 

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import Editor from "./components/Editor";
 import ReaderFeed from "./components/ReaderFeed";
+import Following from "./components/Following";
 import SubscriberPortal from "./components/SubscriberPortal";
 import About from "./components/About";
 import Profile from "./components/Profile";
@@ -13,6 +14,7 @@ import { delegate } from "./lib/delegate";
 export type Tab =
   | "editor"
   | "feed"
+  | "following"
   | "subscribers"
   | "about"
   | "profile"
@@ -38,6 +40,7 @@ export default function App() {
       <main className="flex-1 min-w-0 border-x border-ink-800">
         {tab === "editor" && <Editor />}
         {tab === "feed" && <ReaderFeed onOpenProfile={() => setTab("profile")} />}
+        {tab === "following" && <Following />}
         {tab === "subscribers" && <SubscriberPortal />}
         {tab === "about" && <About />}
         {tab === "profile" && (
