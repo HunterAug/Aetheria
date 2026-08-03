@@ -221,9 +221,9 @@ existing contracts stay signable. The user, not this session, needs to be
 the one who runs that first migration and sets the passphrase, since they're
 the one who has to remember it afterward.
 
-TODO(later), noted in `keys.rs`'s module docs: once Tauri spawns this as a
-sidecar with no attached terminal, this needs a real `unlock { passphrase }`
-IPC message the UI sends before any signing operation, not a stdin prompt.
+This is now solved for real - see "Bundled Freenet node + real in-app
+passphrase unlock" below for the `unlock { passphrase }` IPC message and the
+locked/unlocked startup restructuring it needed.
 
 **Dev convenience, approved by the user for local testing only**: set
 `AETHERIA_DEV_PASSPHRASE` in the environment to skip the interactive prompt
@@ -266,19 +266,27 @@ surfaced a few problems, fixed as follows:
   since Tauri v2 expects at least one capabilities file to exist.
 - **Sidecar binary naming**: Tauri resolves `externalBin` entries by
   appending `-<host-target-triple><exe-suffix>` to the given name. With
-  `"externalBin": ["binaries/aetheria-delegate"]` in `tauri.conf.json` and
-  `.sidecar("aetheria-delegate")` in Rust, the actual file must exist at
-  `app/src-tauri/binaries/aetheria-delegate-x86_64-pc-windows-msvc.exe` on
-  this machine. That file is **not source** - it's a straight copy of
-  `delegate/target/{debug,release}/aetheria-delegate.exe`, gitignored
-  (`app/src-tauri/binaries/` in the root `.gitignore`), and must be
-  regenerated locally before `npm run tauri dev`/`build` after any delegate
-  rebuild:
+  `"externalBin": ["binaries/aetheria-delegate", "binaries/freenet"]` in
+  `tauri.conf.json` and `.sidecar("aetheria-delegate")`/`.sidecar("freenet")`
+  in Rust, the actual files must exist at
+  `app/src-tauri/binaries/aetheria-delegate-x86_64-pc-windows-msvc.exe` and
+  `app/src-tauri/binaries/freenet-x86_64-pc-windows-msvc.exe` on this
+  machine. Neither is **source** - the delegate one is a straight copy of
+  `delegate/target/{debug,release}/aetheria-delegate.exe`, the freenet one a
+  straight copy of `C:\Users\WebDev\AppData\Local\Freenet\bin\freenet.exe`
+  (gitignored, `app/src-tauri/binaries/` in the root `.gitignore`), and both
+  must be regenerated locally before `npm run tauri dev`/`build` after any
+  delegate rebuild (freenet's copy only needs redoing if you want to bundle a
+  newer Freenet version):
   ```
   cp delegate/target/debug/aetheria-delegate.exe \
      app/src-tauri/binaries/aetheria-delegate-x86_64-pc-windows-msvc.exe
+  cp "C:\Users\WebDev\AppData\Local\Freenet\bin\freenet.exe" \
+     app/src-tauri/binaries/freenet-x86_64-pc-windows-msvc.exe
   ```
-  (swap `debug` for `release` for a production bundle).
+  (swap `debug` for `release` for a production bundle). See "Bundled Freenet
+  node" below for why a second sidecar exists at all, and
+  `THIRD_PARTY_LICENSES.md` for the AGPL-3.0 redistribution note.
 - **Vite/Tauri interaction bug**: `tauri dev` builds the Rust shell inside
   `app/src-tauri/target/` while Vite's dev server is also running from
   `app/`. Vite's default file watcher picks up churn in that directory
@@ -287,20 +295,12 @@ surfaced a few problems, fixed as follows:
   of just logging a warning - which in turn kills `tauri dev`'s
   `beforeDevCommand` step. Fixed in `app/vite.config.ts` with
   `server.watch.ignored: ["**/src-tauri/**"]`.
-- **Passphrase stopgap (temporary, not a real solution)**: the sidecar is
-  spawned with `AETHERIA_DEV_PASSPHRASE=aetheria-dev-local-only` and
-  `RUST_LOG=info` set via `.env(...)` in `main.rs`, so `delegate/src/keys.rs`'s
-  encrypted-identity unlock doesn't block forever on an `rpassword` prompt
-  with no attached terminal to read from (see the "Identity key encryption"
-  section above for why that prompt exists). This is marked with a
-  `// TODO(next):` comment in `main.rs`. The real fix is an in-app "enter
-  your passphrase to unlock" screen that sends a new `unlock { passphrase }`
-  IPC request to the delegate before any signing operation - deliberately
-  **not** implemented now because it needs changes to
-  `delegate/src/ipc.rs` and `delegate/src/keys.rs`, both of which a
-  concurrent session is actively editing for the NWC/Lightning payment
-  feature; touching them here would conflict. Follow-up work, tracked as
-  the main remaining gap in this area.
+- **Passphrase unlock**: the sidecar is spawned with no passphrase env var
+  at all - `delegate/src/keys.rs`'s encrypted-identity unlock no longer needs
+  one at startup, because the delegate now starts locked and the real
+  in-app `UnlockScreen` sends an `unlock { passphrase }` IPC request. See
+  "Bundled Freenet node + real in-app passphrase unlock" below for the full
+  story; this used to be a hardcoded `AETHERIA_DEV_PASSPHRASE` stopgap.
 - **Icons**: regenerated the full multi-resolution set with
   `npx tauri icon ../logo.png` (run from `app/`, source is the real 1024x1024
   logo at repo root / `app/public/logo.png`) - replaced the old placeholder
@@ -346,18 +346,188 @@ installers will show an "unknown publisher" warning on install - fine to
 leave unresolved per the task, noted here as a follow-up rather than a
 blocker.
 
-One caveat: the delegate's own `cargo build --release` was failing at build
-time due to unrelated in-progress edits from the concurrent NWC-feature
-session (`ipc.rs`/`db.rs` calling a `get_epoch_key` method that doesn't
-exist yet on `LocalStore` - not something to fix from here, and not touched).
-The sidecar binary bundled into this installer is therefore the **debug**
-build of `aetheria-delegate.exe` copied into `app/src-tauri/binaries/`
-before that breakage happened - functionally correct (it's the same binary
-verified working end-to-end above) but not release-optimized. Re-copy a
-real `cargo build --release` output into
-`app/src-tauri/binaries/aetheria-delegate-x86_64-pc-windows-msvc.exe` and
-rebuild once the delegate compiles clean again, before treating this as a
-real release artifact.
+That debug-binary caveat is resolved: as of the Freenet-sidecar/unlock-screen
+work below, `delegate/target/release/aetheria-delegate.exe` builds clean
+(`cargo build --release`, no errors, no warnings) and is what's actually
+copied into `app/src-tauri/binaries/` and bundled into installers now.
+
+## Bundled Freenet node + real in-app passphrase unlock (as of 2026-08-02)
+
+Two things needed for a real installer that works on someone else's PC with
+zero manual setup: (1) the app was unusable without a Freenet node already
+running, since nothing installed or started one; (2) every fresh install
+would have generated a new identity encrypted under the same hardcoded,
+publicly-known dev passphrase, providing no real protection.
+
+### Part 1: Freenet bundled as a second Tauri sidecar
+
+`app/src-tauri/src/main.rs`'s `.setup()` hook now spawns **two** sidecars,
+`freenet` before `aetheria-delegate` (see "Sidecar binary naming" above):
+`shell.sidecar("freenet").args(["network"]).spawn()` - plain `network` mode,
+deliberately **not** `service`/`service run-wrapper` (Freenet's own
+persistent-background-install layer, which does onboarding/browser-opening
+and its own crash-loop-with-backoff supervision - redundant and actively
+confusing once Tauri is already supervising this as a child process; verified
+by running a real `freenet.exe network` instance against a totally empty
+scratch `--data-dir`/`--config-dir` with stdin closed - it bound its
+WebSocket API and produced zero "onboard"/"dashboard" log lines, vs. the
+`service` wrapper's real historical log on this machine showing a
+"First-run onboarding: dashboard opened" line and a 45-minute crash-loop
+sequence the first time this machine's Freenet install went through it).
+
+- **License**: freenet-core is **AGPL-3.0** (`freenet-stdlib`, which
+  Aetheria's own Rust code links against directly, is separately licensed
+  LGPL by the same project specifically so that's safe for a proprietary
+  app - only the `freenet-core` node binary itself is AGPL). Per
+  freenet-core's own `LICENSE.md`: "applications merely communicating with
+  Freenet over standard protocols (HTTP, WebSocket) without directly linking
+  to freenet-core are not derivative works subject to AGPL requirements" -
+  Aetheria's delegate only ever talks to the bundled node over its loopback
+  WebSocket API, never links against it, so bundling the two binaries
+  together in one installer is mere aggregation, not a combined/derivative
+  work requiring Aetheria itself to be AGPL. The bundled binary is conveyed
+  unmodified, which AGPL permits with notices intact. Full writeup,
+  including the exact bundled version/commit, in `THIRD_PARTY_LICENSES.md`
+  at the repo root - not legal advice, but a real citation of the project's
+  own licensing summary rather than a guess.
+- **Startup sequencing**: rather than a fixed sleep in `main.rs` between
+  spawning the two sidecars, `FreenetBridge::connect_local()` itself
+  (`delegate/src/freenet_bridge.rs`) now retries the initial connection with
+  a fixed 1.5s delay for up to 20 attempts (30s total) before giving up -
+  distinct from `MAX_ATTEMPTS`/`RETRY_DELAY` above it, which govern
+  individual contract operations on an *already-established* connection
+  (different failure mode: "nothing listening on 7509 yet" vs. "the gateway
+  network is flaky"). This also helps the pre-existing CLI-launched delegate
+  if someone starts it before Freenet has finished booting, not just the new
+  sidecar case.
+- **Data directory isolation**: Freenet's own data lives at
+  `%LOCALAPPDATA%\The Freenet Project Inc\Freenet\data\` on Windows (found
+  by inspecting the real running node's logs, e.g. `node_kek`'s path),
+  completely separate from Aetheria's own
+  `%APPDATA%\aetheria\aetheria-delegate\data\` - no override needed or
+  applied for the bundled sidecar's normal path.
+- **Dev/test escape hatches** (both off by default, never touch real data
+  unless explicitly set): `AETHERIA_DATA_DIR_OVERRIDE` (read by
+  `delegate/src/main.rs::local_data_dir`) redirects the delegate's own data
+  dir; `AETHERIA_FREENET_DATA_DIR_OVERRIDE` (read by the Tauri shell's
+  `main.rs`) passes `--data-dir`/`--config-dir` through to the bundled
+  Freenet sidecar. Added specifically so a "fresh machine" test never has to
+  touch this dev machine's real identity/contracts or real Freenet peer
+  state - `directories::ProjectDirs` resolves via the Windows known-folder
+  API, which ignores plain `%APPDATA%`/`%LOCALAPPDATA%` env var overrides,
+  so redirecting it needs an explicit escape hatch like this rather than
+  just setting those.
+- **Exit cleanup**: `RunEvent::ExitRequested`/`Exit` now kills both sidecars
+  (a `Vec<CommandChild>`, LIFO order - delegate first, then the node it was
+  talking to), not just the delegate.
+- **Verified for real, 2026-08-02**: built the full installer
+  (`npm run build:desktop`, both MSI and NSIS), silently installed it
+  (`Aetheria_0.1.0_x64-setup.exe /S`) to `%LOCALAPPDATA%\Aetheria\` (confirmed
+  all three binaries present), then launched the installed `aetheria.exe`
+  with both scratch-dir env vars pointed at brand-new empty directories (the
+  real live Freenet service was cleanly `service stop`/`service start`-paused
+  around this one test to free port 7509, its own data untouched throughout -
+  confirmed identical before/after via the same content_index/publisher_profile
+  keys this file already documents). Confirmed via `netstat`: both the fresh
+  Freenet sidecar (port 7509) and the delegate (port 47021) bound with no
+  collision. Drove a real IPC round trip (`get_profile` → `publish_post` →
+  `get_post`) from a small Node script talking to `ws://127.0.0.1:47021` -
+  `publish_post` returned `network_synced: true` with a real
+  `PostDataContract` id, and `get_post` read back the exact markdown,
+  confirming the full chain (fresh sidecar bind → delegate connect-with-retry
+  → identity PUT → post PUT → GET) actually works, not just that processes
+  started. The real native window also opened and correctly showed the
+  first-run display-name prompt for the fresh identity. Closing the window
+  gracefully killed both sidecars and freed both ports. Uninstalled cleanly
+  afterward (`uninstall.exe /S`) and restarted the real Freenet service.
+
+### Part 2: real in-app passphrase unlock, locked/unlocked startup split
+
+`delegate/src/ipc.rs` gained a real `unlock { passphrase }` request and a
+`lock_status` query (the only two requests answerable while locked); every
+other request is refused with a clear "delegate is locked - send `unlock`
+first" error until unlock succeeds. This needed restructuring startup, not
+just adding a request type:
+
+- `delegate/src/main.rs` no longer loads keys or touches Freenet at all -
+  `main()` now just opens the local SQLite cache and calls
+  `ipc::serve(IPC_PORT, db, identity_key_path)`, which binds and starts
+  accepting connections immediately with `Delegate::unlocked: Option<Unlocked>`
+  still `None`. Everything that used to run synchronously before the
+  listener bound (connect to Freenet, publish/load this identity's
+  `PublisherProfileContract`/`ContentIndexContract`, connect the NWC/platform
+  fee wallets) moved into `ipc.rs`'s `finish_unlock`, which now runs once a
+  passphrase actually arrives.
+- **Two ways a passphrase arrives**, racing to unlock first (whichever gets
+  the lock first wins, the other no-ops): (1) `try_legacy_auto_unlock`,
+  spawned alongside the listener, reuses `DelegateKeys::load_or_generate`
+  *completely unchanged* - same `AETHERIA_DEV_PASSPHRASE` env var check, same
+  `rpassword` stdin prompt on a real interactive terminal
+  (`std::io::stdin().is_terminal()`) - just no longer blocking the listener
+  from starting first; if neither applies (no env var, no terminal - the
+  real Tauri sidecar case), it's a no-op and the delegate just waits. (2) A
+  real `unlock` IPC request from `UnlockScreen`.
+- **New/existing identity distinction** happens purely by checking
+  `identity_key_path.exists()` server-side (`handle_unlock`) - the caller
+  doesn't have to say which case it thinks it's in.
+  `DelegateKeys::create_new`/`unlock_existing` (new, non-interactive
+  counterparts to the existing `load_or_generate`'s two branches - the
+  original CLI/stdin functions are untouched) do the actual work; a wrong
+  passphrase against an existing file surfaces as a plain, retryable `Err`
+  from `unlock_existing`, not a crash.
+- **`Delegate::unlocked()`/`unlocked_mut()`** panic if called while locked -
+  safe because `handle_request`'s dispatch gate refuses every request except
+  `Unlock`/`LockStatus` before any handler that calls them is ever reached.
+- **Frontend**: `app/src/components/UnlockScreen.tsx` gates the entire app
+  in `App.tsx` (before `Sidebar`/`RightRail`/anything else renders, earlier
+  in the lifecycle than the pre-existing `FirstRunNamePrompt` overlay, which
+  still runs afterward for a genuinely blank display name) - shows a plain
+  single-field "Unlock" form if `lock_status.has_existing_identity`, or a
+  passphrase+confirm "Create identity" form otherwise (confirmation is
+  validated client-side, matching what the CLI's `prompt_new_passphrase`
+  double-entry already enforces server-side for the legacy path).
+  `app/src/lib/delegate.ts` gained `lockStatus()`/`unlock(passphrase)`.
+- `AETHERIA_DEV_PASSPHRASE` is no longer hardcoded into the Tauri sidecar
+  spawn in `app/src-tauri/src/main.rs` - `keys.rs` still honors it (and the
+  interactive prompt) for CLI/dev use, it's just not baked into the shipped
+  app's own launch path anymore.
+- **Verified for real, 2026-08-02**, driving the actual release delegate
+  binary through the real Vite dev server UI (not just unit tests), each
+  against a fresh empty `AETHERIA_DATA_DIR_OVERRIDE` scratch dir:
+  - Fresh dir, no terminal, no env var: delegate logged "delegate stays
+    locked until a UI sends an `unlock` request" and bound its IPC listener
+    immediately (no hang). Loading the UI showed the "Create identity" form.
+    Submitting a passphrase + matching confirmation created a real encrypted
+    identity, connected to the real live Freenet node, published real
+    `PublisherProfileContract`/`ContentIndexContract` instances, and
+    transitioned into the normal app (which then correctly showed the
+    unrelated, pre-existing first-run display-name prompt, since the fresh
+    identity has no name yet).
+  - Killed and relaunched against the *same* now-non-empty scratch dir: UI
+    correctly showed the plain "Unlock" form this time
+    (`has_existing_identity: true`). A **wrong passphrase** produced the
+    clean, in-UI, retryable error "wrong passphrase, or the identity file is
+    corrupt" - delegate process stayed alive, form stayed usable, no crash.
+    Retrying with the **correct** passphrase unlocked successfully and
+    derived the exact same `content_index`/`publisher_profile` contract keys
+    as the first run, confirming it loaded the same identity rather than
+    creating a new one.
+  - The legacy `AETHERIA_DEV_PASSPHRASE` env-var path against a separate
+    fresh scratch dir: auto-unlocked with **no IPC call from the UI at
+    all** - "AETHERIA_DEV_PASSPHRASE is set - using it instead of an
+    interactive prompt" (the same log line as before this refactor, since
+    that code is untouched) fired automatically from the background task.
+    On this run the real network's PUT happened to exhaust all 4 retries
+    (the documented gateway-network flakiness above, not a bug) - confirmed
+    the delegate handled that honestly too: logged a clear
+    "finishing startup after automatic unlock failed - delegate stays
+    locked" and did *not* end up in a broken half-unlocked state.
+  - The interactive stdin-prompt path (a real attached terminal) was not
+    independently re-driven end-to-end in this pass, since `load_or_generate`
+    and its prompt helpers in `keys.rs` are byte-for-byte unchanged by this
+    refactor and were already exercised via the env-var path above through
+    the identical `try_legacy_auto_unlock` call site - noted here rather than
+    claimed as directly observed.
 
 ## NWC subscription flow: real ECDH key delivery + real NIP-47 (as of 2026-08-02)
 

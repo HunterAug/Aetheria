@@ -126,6 +126,43 @@ impl DelegateKeys {
         std::fs::write(path, out).with_context(|| format!("writing {path:?}"))
     }
 
+    /// Non-interactive counterpart to `load_or_generate`'s new-identity
+    /// branch, for the IPC `unlock` flow (see `ipc.rs`'s module docs) - the
+    /// delegate already knows (via `identity_key_path.exists()`) that this is
+    /// a first run before calling this, so there's no stdin prompt here, just
+    /// the passphrase the UI already collected (with its own confirm-field
+    /// double-entry, matching what `prompt_new_passphrase` enforces on the
+    /// CLI path).
+    pub fn create_new(path: &Path, passphrase: &str) -> Result<Self> {
+        anyhow::ensure!(!path.exists(), "identity file already exists at {path:?}");
+        anyhow::ensure!(!passphrase.is_empty(), "passphrase cannot be empty");
+        let keys = Self::generate();
+        keys.save(path, passphrase)?;
+        Ok(keys)
+    }
+
+    /// Non-interactive counterpart to `load_or_generate`'s existing-file
+    /// branch. A wrong passphrase surfaces as a plain `Err` from
+    /// `load_encrypted` - callers (the `unlock` IPC handler) should treat
+    /// that as a retryable user-facing error, not a crash.
+    pub fn unlock_existing(path: &Path, passphrase: &str) -> Result<Self> {
+        let raw = std::fs::read(path).with_context(|| format!("reading {path:?}"))?;
+        match raw.len() {
+            LEGACY_PLAINTEXT_LEN => {
+                tracing::warn!(
+                    "identity file is in the old unencrypted format - migrating to encrypted storage"
+                );
+                let keys = Self::from_key_material(&raw)?;
+                keys.save(path, passphrase)?;
+                Ok(keys)
+            }
+            ENCRYPTED_LEN => Self::load_encrypted(&raw, passphrase),
+            other => anyhow::bail!(
+                "corrupt identity file: {other} bytes (expected {LEGACY_PLAINTEXT_LEN} or {ENCRYPTED_LEN})"
+            ),
+        }
+    }
+
     pub fn master_signing_verifying_bytes(&self) -> [u8; 32] {
         VerifyingKey::from(&self.master_signing).to_bytes()
     }

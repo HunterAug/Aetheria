@@ -25,14 +25,15 @@ function findFiles(dir, predicate) {
 }
 
 const targets = [
-  // The raw app binary - but it only runs standalone if the delegate
-  // sidecar sits in the same folder (Tauri's Command::sidecar() resolves it
-  // relative to the running exe's own directory, not any fixed path), so
-  // the plain-named sidecar copy cargo leaves next to it has to come along
+  // The raw app binary - but it only runs standalone if its sidecars sit in
+  // the same folder (Tauri's Command::sidecar() resolves them relative to
+  // the running exe's own directory, not any fixed path), so the
+  // plain-named sidecar copies cargo leaves next to it have to come along
   // too. Confirmed by reproducing "immediately fails" with just aetheria.exe
   // copied alone (2026-08-02) - `NotFound` on the sidecar spawn.
   join(releaseDir, "aetheria.exe"),
   join(releaseDir, "aetheria-delegate.exe"),
+  join(releaseDir, "freenet.exe"),
   // Installers, wherever tauri's bundler put them this run.
   ...findFiles(bundleDir, (name) => name.endsWith(".msi")),
   ...findFiles(bundleDir, (name) => name.endsWith("-setup.exe")),

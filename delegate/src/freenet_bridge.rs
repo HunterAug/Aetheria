@@ -67,6 +67,22 @@ pub const NODE_WS_URL: &str = "ws://127.0.0.1:7509/v1/contract/command?encodingP
 const MAX_ATTEMPTS: u32 = 4;
 const RETRY_DELAY: Duration = Duration::from_millis(1500);
 
+/// `connect_local()`'s own retry budget - distinct from `MAX_ATTEMPTS`/
+/// `RETRY_DELAY` above, which govern individual contract *operations* against
+/// an already-established connection. This one covers the initial TCP+WS
+/// handshake itself, whose failure mode is different: "nothing is listening
+/// on 7509 yet" (connection refused), not "the gateway network is flaky".
+/// That's the normal state for the first few seconds after the bundled
+/// Freenet sidecar (see app/src-tauri/src/main.rs) is spawned - it needs a
+/// moment to bind its WebSocket API - and also whenever someone launches the
+/// CLI delegate slightly before starting Freenet by hand. A bounded retry
+/// loop here absorbs that startup race without a fixed sleep in main.rs (which
+/// would either be too short on a slow machine or waste time on a fast one),
+/// and still fails outright - not hang forever - if no node shows up at all
+/// within the window.
+const CONNECT_MAX_ATTEMPTS: u32 = 20;
+const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(1500);
+
 pub struct FreenetBridge {
     // A single shared connection, guarded so a send+recv round trip for one
     // request completes atomically w.r.t. any other caller - two interleaved
@@ -75,14 +91,39 @@ pub struct FreenetBridge {
 }
 
 impl FreenetBridge {
-    /// Connect to a Freenet node running on this machine.
+    /// Connect to a Freenet node running on this machine, retrying with a
+    /// fixed delay for up to `CONNECT_MAX_ATTEMPTS * CONNECT_RETRY_DELAY` (30s)
+    /// before giving up - see that constant's doc comment for why this needs
+    /// its own retry budget separate from `MAX_ATTEMPTS` above.
     pub async fn connect_local() -> Result<Self> {
-        let (stream, _) = tokio_tungstenite::connect_async(NODE_WS_URL)
-            .await
-            .with_context(|| format!("connecting to Freenet node at {NODE_WS_URL}"))?;
-        Ok(Self {
-            api: Mutex::new(WebApi::start(stream)),
-        })
+        for attempt in 1..=CONNECT_MAX_ATTEMPTS {
+            match tokio_tungstenite::connect_async(NODE_WS_URL).await {
+                Ok((stream, _)) => {
+                    if attempt > 1 {
+                        tracing::info!(attempt, "connected to Freenet node after retrying");
+                    }
+                    return Ok(Self {
+                        api: Mutex::new(WebApi::start(stream)),
+                    });
+                }
+                Err(e) if attempt < CONNECT_MAX_ATTEMPTS => {
+                    tracing::warn!(
+                        attempt,
+                        error = %e,
+                        "Freenet node not reachable yet at {NODE_WS_URL}, retrying"
+                    );
+                    tokio::time::sleep(CONNECT_RETRY_DELAY).await;
+                }
+                Err(e) => {
+                    return Err(e).with_context(|| {
+                        format!(
+                            "connecting to Freenet node at {NODE_WS_URL} (gave up after {CONNECT_MAX_ATTEMPTS} attempts)"
+                        )
+                    })
+                }
+            }
+        }
+        unreachable!("loop above always returns on its last iteration")
     }
 
     /// Publishes a brand-new contract instance (code + initial state) and

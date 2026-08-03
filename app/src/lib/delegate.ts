@@ -115,6 +115,19 @@ export interface RemotePostDetail {
   markdown: string;
 }
 
+export interface LockStatus {
+  locked: boolean;
+  /// Whether an identity.key already exists on disk - lets the UI show a
+  /// plain "unlock" form vs. a "create a passphrase" form (with confirm
+  /// field) without guessing.
+  has_existing_identity: boolean;
+}
+
+export interface UnlockResult {
+  created_new_identity: boolean;
+  already_unlocked: boolean;
+}
+
 /// A post that's been opened and is ready to render - the shape
 /// `ReaderFeed.tsx`/`Following.tsx` build once they have both the feed
 /// item's metadata (title, author) and the fetched markdown body.
@@ -182,6 +195,21 @@ class DelegateClient {
       this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
       socket.send(JSON.stringify({ id, op, ...extra }));
     });
+  }
+
+  /// Answerable even while the delegate is locked (see delegate/src/ipc.rs's
+  /// module docs) - call this before anything else so the UI knows whether
+  /// to show the unlock screen at all, and if so, which form (plain unlock
+  /// vs. create-a-new-passphrase).
+  lockStatus(): Promise<LockStatus> {
+    return this.call("lock_status");
+  }
+
+  /// Creates a new identity under `passphrase` (if none exists yet) or
+  /// unlocks the existing one. A wrong passphrase against an existing
+  /// identity rejects with a retryable error, not a crash.
+  unlock(passphrase: string): Promise<UnlockResult> {
+    return this.call("unlock", { passphrase });
   }
 
   listPosts(): Promise<PostSummary[]> {

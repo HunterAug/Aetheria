@@ -32,6 +32,6 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "externalBin": ["binaries/aetheria-delegate"]
+    "externalBin": ["binaries/aetheria-delegate", "binaries/freenet"]
   }
 }

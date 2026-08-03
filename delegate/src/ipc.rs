@@ -7,6 +7,30 @@
 //! publish -> feed -> read loop entirely against the local SQLite cache;
 //! there is no Freenet broadcast or subscriber decryption yet (see
 //! `freenet_bridge.rs` and `nwc.rs`).
+//!
+//! ## Locked/unlocked startup (as of 2026-08-02)
+//!
+//! Loading `DelegateKeys` needs a passphrase, and getting one used to block
+//! `main()` on an `rpassword` stdin prompt *before* the IPC listener even
+//! bound its port - fine for a CLI-launched delegate with a real terminal,
+//! fatal for the Tauri sidecar case (no attached terminal to read from, see
+//! `keys.rs`'s module docs). So startup is split in two: `serve()` binds and
+//! starts accepting connections immediately with `Delegate::unlocked` still
+//! `None` (the "locked" state), and every request except `Unlock` is refused
+//! with a clear "delegate is locked" error until a passphrase actually
+//! unlocks (or creates) the identity - see `handle_unlock`/`finish_unlock`.
+//! Only once unlocked does the delegate connect to Freenet and publish/load
+//! this identity's `PublisherProfileContract`/`ContentIndexContract` (what
+//! used to happen unconditionally in `main.rs` before this split).
+//!
+//! The old CLI convenience paths (`AETHERIA_DEV_PASSPHRASE`, or an
+//! interactive `rpassword` prompt on a real terminal) still work completely
+//! unchanged - `try_legacy_auto_unlock`, spawned alongside the listener,
+//! races to unlock automatically using the exact same `DelegateKeys::load_or_generate`
+//! the old synchronous startup used, just without blocking the listener from
+//! starting first. If neither applies (no env var, no interactive terminal -
+//! the real Tauri sidecar case), it's a no-op and the delegate just waits for
+//! a UI-driven `Unlock` request instead of hanging.
 
 use crate::{
     contracts::{self, PublisherIdentity},
@@ -21,6 +45,8 @@ use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use std::io::IsTerminal;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
@@ -30,6 +56,23 @@ use tokio_tungstenite::tungstenite::Message;
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum Request {
+    /// Must succeed before any other request - see this module's docs on the
+    /// locked/unlocked startup split. Distinguishes "no identity.key yet"
+    /// (creates a new one under `passphrase`, matching what the CLI's
+    /// interactive `prompt_new_passphrase` would do, minus the confirm-field
+    /// double-entry - the UI is responsible for that) from "identity.key
+    /// exists" (unlocks it; a wrong passphrase is a retryable error, not a
+    /// crash) purely by checking whether the identity file exists on disk -
+    /// the caller doesn't need to say which case it thinks it's in.
+    Unlock {
+        passphrase: String,
+    },
+    /// The only other request answerable while locked (see `handle_request`'s
+    /// dispatch gate) - lets the UI show the right unlock screen (a plain
+    /// unlock form vs. a create-new-identity form with password
+    /// confirmation) without guessing, and without exposing anything more
+    /// sensitive than "does a file exist on disk".
+    LockStatus,
     ListPosts,
     GetPost {
         post_id: String,
@@ -120,36 +163,55 @@ struct Response<'a> {
     error: Option<String>,
 }
 
-struct Delegate {
-    db: LocalStore,
+/// Everything that only exists once the delegate is unlocked - split out of
+/// `Delegate` so "locked" is representable as `Delegate::unlocked == None`
+/// rather than needing placeholder/dummy values for a `FreenetBridge` (which
+/// has no cheap empty state - it's a live websocket connection) or the other
+/// fields here.
+struct Unlocked {
     keys: DelegateKeys,
     freenet: FreenetBridge,
     nwc: NwcClient,
     identity: PublisherIdentity,
     /// Optional 2% platform fee wallet (design doc §6.3) - disconnected
     /// unless `AETHERIA_PLATFORM_FEE_NWC` was set at startup (see
-    /// `main.rs::connect_platform_fee_wallet`). `handle_subscribe` checks
+    /// `connect_platform_fee_wallet`). `handle_subscribe` checks
     /// `is_connected()` before doing anything with it.
     platform_fee: NwcClient,
 }
 
-pub async fn serve(
-    port: u16,
+struct Delegate {
     db: LocalStore,
-    keys: DelegateKeys,
-    freenet: FreenetBridge,
-    nwc: NwcClient,
-    identity: PublisherIdentity,
-    platform_fee: NwcClient,
-) -> Result<()> {
+    identity_key_path: PathBuf,
+    unlocked: Option<Unlocked>,
+}
+
+impl Delegate {
+    /// Panics if the delegate is still locked. Safe to call unconditionally
+    /// from any handler below `handle_message`'s dispatch gate, which refuses
+    /// every request except `Unlock` while `unlocked` is `None` - so no
+    /// handler that calls this is ever reached in a locked state.
+    fn unlocked(&self) -> &Unlocked {
+        self.unlocked
+            .as_ref()
+            .expect("Delegate::unlocked() called while locked - dispatch gate should have refused this")
+    }
+
+    fn unlocked_mut(&mut self) -> &mut Unlocked {
+        self.unlocked
+            .as_mut()
+            .expect("Delegate::unlocked_mut() called while locked - dispatch gate should have refused this")
+    }
+}
+
+pub async fn serve(port: u16, db: LocalStore, identity_key_path: PathBuf) -> Result<()> {
     let delegate = Arc::new(Mutex::new(Delegate {
         db,
-        keys,
-        freenet,
-        nwc,
-        identity,
-        platform_fee,
+        identity_key_path: identity_key_path.clone(),
+        unlocked: None,
     }));
+
+    tokio::spawn(try_legacy_auto_unlock(delegate.clone(), identity_key_path));
 
     let addr = format!("127.0.0.1:{port}");
     let listener = TcpListener::bind(&addr).await?;
@@ -176,6 +238,141 @@ pub async fn serve(
     Ok(())
 }
 
+/// Races the IPC-driven `Unlock` request to bring the delegate out of its
+/// locked startup state, using the exact same passphrase sources the old
+/// (pre-restructuring) synchronous startup used - see this module's docs.
+/// Whichever unlock path finishes first wins; `finish_unlock` no-ops if the
+/// delegate is already unlocked by the time it acquires the lock.
+async fn try_legacy_auto_unlock(delegate: Arc<Mutex<Delegate>>, identity_key_path: PathBuf) {
+    let should_attempt =
+        std::env::var("AETHERIA_DEV_PASSPHRASE").is_ok() || std::io::stdin().is_terminal();
+    if !should_attempt {
+        tracing::info!(
+            "no AETHERIA_DEV_PASSPHRASE and no interactive terminal attached - delegate stays \
+             locked until a UI sends an `unlock` request"
+        );
+        return;
+    }
+
+    let result =
+        tokio::task::spawn_blocking(move || DelegateKeys::load_or_generate(&identity_key_path))
+            .await;
+    let keys = match result {
+        Ok(Ok(keys)) => keys,
+        Ok(Err(e)) => {
+            tracing::error!(
+                error = %e,
+                "startup unlock failed - delegate stays locked, waiting for an `unlock` IPC request"
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "startup unlock task panicked - delegate stays locked");
+            return;
+        }
+    };
+
+    let mut d = delegate.lock().await;
+    if d.unlocked.is_some() {
+        return; // Raced with a UI-driven `unlock` that got there first.
+    }
+    if let Err(e) = finish_unlock(&mut d, keys).await {
+        tracing::error!(
+            error = %e,
+            "finishing startup after automatic unlock failed - delegate stays locked"
+        );
+    }
+}
+
+/// Handles a passphrase from either unlock path (see `Request::Unlock`'s
+/// docs for the new-vs-existing distinction) once the raw `DelegateKeys` are
+/// in hand: connects to Freenet (with `FreenetBridge::connect_local`'s own
+/// retry-with-backoff, see that function's docs) and publishes/loads this
+/// identity's `PublisherProfileContract`/`ContentIndexContract` - the same
+/// work `main.rs` used to do unconditionally before this module's
+/// locked/unlocked split.
+async fn finish_unlock(delegate: &mut Delegate, keys: DelegateKeys) -> Result<()> {
+    tracing::info!(
+        publisher_pubkey = %hex::encode(keys.master_signing_verifying_bytes()),
+        "delegate identity ready"
+    );
+    let freenet = FreenetBridge::connect_local()
+        .await
+        .context("connecting to the Freenet node")?;
+    let identity = contracts::ensure_publisher_identity(&freenet, &delegate.db, &keys)
+        .await
+        .context("publishing/loading this delegate's PublisherProfileContract and ContentIndexContract")?;
+    tracing::info!(
+        content_index = %identity.content_index_key.encoded_contract_id(),
+        publisher_profile = %identity.profile_key.encoded_contract_id(),
+        "Freenet publisher identity ready"
+    );
+    let nwc = NwcClient::disconnected();
+    let platform_fee = connect_platform_fee_wallet().await;
+    delegate.unlocked = Some(Unlocked {
+        keys,
+        freenet,
+        nwc,
+        identity,
+        platform_fee,
+    });
+    Ok(())
+}
+
+/// Optional 2% platform fee (design doc §6.3's "Optional App Split"): if
+/// `AETHERIA_PLATFORM_FEE_NWC` is set to a real `nostr+walletconnect://...`
+/// URI, `handle_subscribe` requests a small fee invoice from this wallet
+/// alongside the main subscription payment, best-effort. Unset by default -
+/// a fork of this app run by someone else shouldn't silently try to pay a
+/// stranger's wallet. **Never hardcode a real connection string here or
+/// anywhere else in this repo** - it's a real secret (scoped receive-only:
+/// make_invoice/lookup_invoice/get_info/get_balance, no pay_invoice, so even
+/// a leaked string can't be used to spend funds, but it's still not
+/// something to commit to git history). Moved here from `main.rs` as part of
+/// the locked/unlocked startup split - this now runs once per successful
+/// unlock rather than once at process start.
+async fn connect_platform_fee_wallet() -> NwcClient {
+    let mut client = NwcClient::disconnected();
+    match std::env::var("AETHERIA_PLATFORM_FEE_NWC") {
+        Ok(uri) if !uri.trim().is_empty() => match client.connect(&uri).await {
+            Ok(()) => {
+                tracing::info!("platform fee wallet connected - 2% subscription split enabled");
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "AETHERIA_PLATFORM_FEE_NWC is set but failed to connect - platform fee split disabled this run"
+                );
+            }
+        },
+        _ => {}
+    }
+    client
+}
+
+/// First run (no identity file yet) creates a fresh identity under
+/// `passphrase`; an existing file is unlocked (or migrated, if legacy
+/// plaintext) with it. A wrong passphrase against an existing file surfaces
+/// as a plain, retryable `Err` - not a crash - matching
+/// `DelegateKeys::unlock_existing`'s contract.
+async fn handle_unlock(delegate: &mut Delegate, passphrase: &str) -> Result<serde_json::Value> {
+    if delegate.unlocked.is_some() {
+        return Ok(serde_json::json!({ "created_new_identity": false, "already_unlocked": true }));
+    }
+
+    let is_new = !delegate.identity_key_path.exists();
+    let path = delegate.identity_key_path.clone();
+    let keys = if is_new {
+        anyhow::ensure!(!passphrase.is_empty(), "passphrase cannot be empty");
+        DelegateKeys::create_new(&path, passphrase)?
+    } else {
+        DelegateKeys::unlock_existing(&path, passphrase)?
+    };
+
+    finish_unlock(delegate, keys).await?;
+    Ok(serde_json::json!({ "created_new_identity": is_new, "already_unlocked": false }))
+}
+
 async fn handle_message(delegate: &Arc<Mutex<Delegate>>, text: &str) -> String {
     let envelope: Envelope = match serde_json::from_str(text) {
         Ok(e) => e,
@@ -190,38 +387,7 @@ async fn handle_message(delegate: &Arc<Mutex<Delegate>>, text: &str) -> String {
     };
 
     let mut d = delegate.lock().await;
-    let outcome = match envelope.request {
-        Request::ListPosts => handle_list_posts(&d),
-        Request::GetPost { post_id } => handle_get_post(&d, &post_id),
-        Request::PublishPost {
-            title,
-            summary,
-            markdown,
-            access,
-        } => handle_publish_post(&d, &title, &summary, &markdown, &access).await,
-        Request::GetProfile => handle_get_profile(&d),
-        Request::UpdateProfile {
-            display_name,
-            bio,
-            avatar_data_url,
-        } => handle_update_profile(&d, &display_name, &bio, avatar_data_url.as_deref()).await,
-        Request::ConnectWallet { uri } => handle_connect_wallet(&mut d, &uri).await,
-        Request::GetSubscriptionInfo => handle_get_subscription_info(&d),
-        Request::Subscribe { tier_id } => handle_subscribe(&d, tier_id).await,
-        Request::ListSubscribers => handle_list_subscribers(&d),
-        Request::FollowPublisher { author_pubkey } => {
-            handle_follow_publisher(&d, &author_pubkey).await
-        }
-        Request::UnfollowPublisher { author_pubkey } => {
-            handle_unfollow_publisher(&d, &author_pubkey)
-        }
-        Request::ListFollowedPublishers => handle_list_followed_publishers(&d),
-        Request::GetHomeFeed => handle_get_home_feed(&d).await,
-        Request::GetFollowingFeed => handle_get_following_feed(&d).await,
-        Request::GetRemotePost { post_contract_id } => {
-            handle_get_remote_post(&d, &post_contract_id).await
-        }
-    };
+    let outcome = handle_request(&mut d, envelope.request).await;
 
     let response = match outcome {
         Ok(result) => Response {
@@ -236,6 +402,62 @@ async fn handle_message(delegate: &Arc<Mutex<Delegate>>, text: &str) -> String {
         },
     };
     serde_json::to_string(&response).unwrap()
+}
+
+/// Dispatch gate: `Unlock` is the only request handled while locked; every
+/// other request is refused with a clear, retryable error instead of being
+/// dispatched at all - so every handler below can assume `delegate.unlocked`
+/// is `Some` (see `Delegate::unlocked()`/`unlocked_mut()`).
+async fn handle_request(delegate: &mut Delegate, request: Request) -> Result<serde_json::Value> {
+    match request {
+        Request::Unlock { passphrase } => handle_unlock(delegate, &passphrase).await,
+        Request::LockStatus => Ok(serde_json::json!({
+            "locked": delegate.unlocked.is_none(),
+            "has_existing_identity": delegate.identity_key_path.exists(),
+        })),
+        other => {
+            anyhow::ensure!(
+                delegate.unlocked.is_some(),
+                "delegate is locked - send `unlock` first"
+            );
+            match other {
+                Request::Unlock { .. } | Request::LockStatus => unreachable!("handled above"),
+                Request::ListPosts => handle_list_posts(delegate),
+                Request::GetPost { post_id } => handle_get_post(delegate, &post_id),
+                Request::PublishPost {
+                    title,
+                    summary,
+                    markdown,
+                    access,
+                } => handle_publish_post(delegate, &title, &summary, &markdown, &access).await,
+                Request::GetProfile => handle_get_profile(delegate),
+                Request::UpdateProfile {
+                    display_name,
+                    bio,
+                    avatar_data_url,
+                } => {
+                    handle_update_profile(delegate, &display_name, &bio, avatar_data_url.as_deref())
+                        .await
+                }
+                Request::ConnectWallet { uri } => handle_connect_wallet(delegate, &uri).await,
+                Request::GetSubscriptionInfo => handle_get_subscription_info(delegate),
+                Request::Subscribe { tier_id } => handle_subscribe(delegate, tier_id).await,
+                Request::ListSubscribers => handle_list_subscribers(delegate),
+                Request::FollowPublisher { author_pubkey } => {
+                    handle_follow_publisher(delegate, &author_pubkey).await
+                }
+                Request::UnfollowPublisher { author_pubkey } => {
+                    handle_unfollow_publisher(delegate, &author_pubkey)
+                }
+                Request::ListFollowedPublishers => handle_list_followed_publishers(delegate),
+                Request::GetHomeFeed => handle_get_home_feed(delegate).await,
+                Request::GetFollowingFeed => handle_get_following_feed(delegate).await,
+                Request::GetRemotePost { post_contract_id } => {
+                    handle_get_remote_post(delegate, &post_contract_id).await
+                }
+            }
+        }
+    }
 }
 
 fn handle_list_posts(delegate: &Delegate) -> Result<serde_json::Value> {
@@ -380,9 +602,9 @@ async fn handle_publish_post(
     // failure - while `list_posts`/`get_post` keep working unconditionally
     // for the post either way.
     let (post_contract_id, network_synced, network_error) = match contracts::publish_post_to_network(
-        &delegate.freenet,
-        &delegate.keys,
-        &delegate.identity,
+        &delegate.unlocked().freenet,
+        &delegate.unlocked().keys,
+        &delegate.unlocked().identity,
         post_id,
         title,
         summary,
@@ -462,10 +684,10 @@ async fn handle_update_profile(
     ) = if let Some(data_url) = avatar_data_url {
         let (mime, bytes) = decode_data_url(data_url)?;
         let key = match contracts::publish_avatar_to_network(
-            &delegate.freenet,
+            &delegate.unlocked().freenet,
             &delegate.db,
-            &delegate.identity,
-            delegate.keys.master_signing_verifying_bytes(),
+            &delegate.unlocked().identity,
+            delegate.unlocked().keys.master_signing_verifying_bytes(),
             bytes.clone(),
         )
         .await
@@ -502,9 +724,9 @@ async fn handle_update_profile(
     )?;
 
     let profile_synced = match contracts::publish_profile_to_network(
-        &delegate.freenet,
-        &delegate.keys,
-        &delegate.identity,
+        &delegate.unlocked().freenet,
+        &delegate.unlocked().keys,
+        &delegate.unlocked().identity,
         display_name,
         bio,
         avatar_freenet_key.clone(),
@@ -548,16 +770,16 @@ fn default_tiers() -> Vec<aetheria_types::Tier> {
 }
 
 async fn handle_connect_wallet(delegate: &mut Delegate, uri: &str) -> Result<serde_json::Value> {
-    delegate.nwc.connect(uri).await?;
+    delegate.unlocked_mut().nwc.connect(uri).await?;
     Ok(serde_json::json!({ "connected": true }))
 }
 
 fn handle_get_subscription_info(delegate: &Delegate) -> Result<serde_json::Value> {
     Ok(serde_json::json!({
-        "publisher_pubkey": hex::encode(delegate.keys.master_signing_verifying_bytes()),
-        "subscriber_pubkey": hex::encode(delegate.keys.identity_public_compressed()),
+        "publisher_pubkey": hex::encode(delegate.unlocked().keys.master_signing_verifying_bytes()),
+        "subscriber_pubkey": hex::encode(delegate.unlocked().keys.identity_public_compressed()),
         "tiers": default_tiers(),
-        "wallet_connected": delegate.nwc.is_connected(),
+        "wallet_connected": delegate.unlocked().nwc.is_connected(),
     }))
 }
 
@@ -580,7 +802,7 @@ async fn handle_subscribe(delegate: &Delegate, tier_id: u8) -> Result<serde_json
         .find(|t| t.tier_id == tier_id)
         .ok_or_else(|| anyhow::anyhow!("unknown tier_id {tier_id}"))?;
     anyhow::ensure!(
-        delegate.nwc.is_connected(),
+        delegate.unlocked().nwc.is_connected(),
         "connect a Lightning wallet first (Nostr Wallet Connect)"
     );
 
@@ -592,6 +814,7 @@ async fn handle_subscribe(delegate: &Delegate, tier_id: u8) -> Result<serde_json
 
     // Publisher role: mint an invoice against the connected wallet.
     let invoice = delegate
+        .unlocked()
         .nwc
         .make_invoice(amount_msat, &description)
         .await
@@ -603,6 +826,7 @@ async fn handle_subscribe(delegate: &Delegate, tier_id: u8) -> Result<serde_json
     // wallet; nothing here assumes they're the same wallet, it just happens
     // to be true today because there's only one identity to test with).
     let claimed_preimage = delegate
+        .unlocked()
         .nwc
         .pay_invoice(&invoice.bolt11)
         .await
@@ -611,6 +835,7 @@ async fn handle_subscribe(delegate: &Delegate, tier_id: u8) -> Result<serde_json
     // Publisher role again: verify settlement independently (design doc
     // §5.2 step 5) rather than trusting the payer's own claim.
     let confirmed_preimage = delegate
+        .unlocked()
         .nwc
         .wait_for_preimage(&invoice.payment_hash, Duration::from_secs(30), Duration::from_secs(2))
         .await
@@ -628,7 +853,7 @@ async fn handle_subscribe(delegate: &Delegate, tier_id: u8) -> Result<serde_json
     // of what a network/secondary side-effect does" philosophy as
     // everywhere else in this file. Skipped entirely if no platform fee
     // wallet is configured (see `main.rs::connect_platform_fee_wallet`).
-    let (platform_fee_synced, platform_fee_error) = if delegate.platform_fee.is_connected() {
+    let (platform_fee_synced, platform_fee_error) = if delegate.unlocked().platform_fee.is_connected() {
         const PLATFORM_FEE_BASIS_POINTS: u64 = 200; // 2.00%
         let fee_amount_msat = amount_msat.saturating_mul(PLATFORM_FEE_BASIS_POINTS) / 10_000;
         if fee_amount_msat == 0 {
@@ -656,10 +881,11 @@ async fn handle_subscribe(delegate: &Delegate, tier_id: u8) -> Result<serde_json
         .db
         .get_or_create_epoch_key(epoch_id, crypto::generate_epoch_key, now)?;
 
-    let subscriber_pubkey = delegate.keys.identity_public_compressed();
+    let subscriber_pubkey = delegate.unlocked().keys.identity_public_compressed();
     let subscriber_public = k256::PublicKey::from_sec1_bytes(&subscriber_pubkey)
         .context("decoding own compressed secp256k1 pubkey")?;
-    let shared_secret = crypto::derive_shared_secret(&delegate.keys.identity_secret, &subscriber_public);
+    let shared_secret =
+        crypto::derive_shared_secret(&delegate.unlocked().keys.identity_secret, &subscriber_public);
     let wrapped = crypto::wrap_epoch_key(&shared_secret, &epoch_key)?;
 
     let bundle = aetheria_types::EncryptedKeyBundle {
@@ -680,8 +906,13 @@ async fn handle_subscribe(delegate: &Delegate, tier_id: u8) -> Result<serde_json
         .record_subscriber(&bundle.subscriber_pubkey, epoch_id, now)?;
 
     let (registry_synced, network_error) =
-        match contracts::publish_key_bundle_to_network(&delegate.freenet, &delegate.db, &delegate.keys, bundle)
-            .await
+        match contracts::publish_key_bundle_to_network(
+            &delegate.unlocked().freenet,
+            &delegate.db,
+            &delegate.unlocked().keys,
+            bundle,
+        )
+        .await
         {
             Ok(_key) => (true, None),
             Err(e) => {
@@ -706,7 +937,7 @@ async fn handle_subscribe(delegate: &Delegate, tier_id: u8) -> Result<serde_json
 }
 
 /// Requests a `fee_amount_msat` invoice from the platform fee wallet and
-/// pays it via the reader's own connected wallet (`delegate.nwc` - same
+/// pays it via the reader's own connected wallet (`delegate.unlocked().nwc` - same
 /// dual-role-one-wallet caveat as the main subscription payment in this
 /// milestone's single-identity architecture, see `nwc.rs`'s module docs).
 /// No settlement re-verification via `lookup_invoice` here, unlike the main
@@ -715,11 +946,13 @@ async fn handle_subscribe(delegate: &Delegate, tier_id: u8) -> Result<serde_json
 async fn collect_platform_fee(delegate: &Delegate, fee_amount_msat: u64, tier_id: u8) -> Result<()> {
     let description = format!("Aetheria platform fee: tier {tier_id} subscription");
     let invoice = delegate
+        .unlocked()
         .platform_fee
         .make_invoice(fee_amount_msat, &description)
         .await
         .context("requesting platform fee invoice via NWC")?;
     delegate
+        .unlocked()
         .nwc
         .pay_invoice(&invoice.bolt11)
         .await
@@ -753,11 +986,11 @@ async fn handle_follow_publisher(
 ) -> Result<serde_json::Value> {
     let author_pubkey: [u8; 32] = hex::decode_array(author_pubkey_hex)?;
     anyhow::ensure!(
-        author_pubkey != delegate.keys.master_signing_verifying_bytes(),
+        author_pubkey != delegate.unlocked().keys.master_signing_verifying_bytes(),
         "that's your own publication - you're already in your own Home feed"
     );
 
-    let profile = contracts::fetch_remote_profile(&delegate.freenet, author_pubkey)
+    let profile = contracts::fetch_remote_profile(&delegate.unlocked().freenet, author_pubkey)
         .await
         .context("looking up that publisher's profile on the network")?
         .ok_or_else(|| {
@@ -824,7 +1057,7 @@ fn own_feed_items(delegate: &Delegate) -> Result<Vec<serde_json::Value>> {
         .map(|p| p.display_name)
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "Untitled Publication".to_string());
-    let author_pubkey = hex::encode(delegate.keys.master_signing_verifying_bytes());
+    let author_pubkey = hex::encode(delegate.unlocked().keys.master_signing_verifying_bytes());
 
     Ok(delegate
         .db
@@ -864,7 +1097,7 @@ async fn followed_feed_items(delegate: &Delegate) -> Vec<serde_json::Value> {
 
     let mut items = Vec::new();
     for f in followed {
-        match contracts::fetch_remote_posts(&delegate.freenet, f.author_pubkey).await {
+        match contracts::fetch_remote_posts(&delegate.unlocked().freenet, f.author_pubkey).await {
             Ok(posts) => {
                 for header in posts {
                     let (access_level, locked) = match header.access_level {
@@ -936,7 +1169,7 @@ async fn handle_get_remote_post(
     delegate: &Delegate,
     post_contract_id: &str,
 ) -> Result<serde_json::Value> {
-    let payload = contracts::fetch_remote_post_payload(&delegate.freenet, post_contract_id).await?;
+    let payload = contracts::fetch_remote_post_payload(&delegate.unlocked().freenet, post_contract_id).await?;
     anyhow::ensure!(
         payload.nonce == [0u8; 12],
         "this post is subscriber-only content from another publisher and can't be opened yet - \
