@@ -98,10 +98,22 @@ export const markdownComponents: Components = {
   ),
 };
 
+/// Generic "list of posts, click to read one" screen - the same shape backs
+/// both the Home tab (following feed) and the Latest tab (network-wide
+/// feed), so this takes which fetch to run and what to call it rather than
+/// being two near-duplicate components.
 export default function ReaderFeed({
+  title,
+  fetchItems,
+  emptyMessage,
   onOpenProfile,
+  onViewAuthor,
 }: {
+  title: string;
+  fetchItems: () => Promise<FeedItem[]>;
+  emptyMessage: string;
   onOpenProfile: () => void;
+  onViewAuthor: (authorPubkey: string) => void;
 }) {
   const [items, setItems] = useState<FeedItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -111,12 +123,16 @@ export default function ReaderFeed({
   async function refresh() {
     setError(null);
     try {
-      setItems(await delegate.getHomeFeed());
+      setItems(await fetchItems());
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
   }
 
+  // `fetchItems` intentionally not in the dependency array - App.tsx remounts
+  // this component (a fresh instance) whenever the tab switches, so a plain
+  // once-on-mount effect is enough and avoids re-fetching on every parent
+  // render just because an inline arrow function prop got a new identity.
   useEffect(() => {
     refresh();
   }, []);
@@ -163,6 +179,7 @@ export default function ReaderFeed({
         post={selected}
         onBack={() => setSelected(null)}
         onOpenProfile={onOpenProfile}
+        onViewAuthor={onViewAuthor}
       />
     );
   }
@@ -170,9 +187,7 @@ export default function ReaderFeed({
   return (
     <div className="max-w-2xl mx-auto">
       <div className="flex items-center justify-between px-6 py-4 border-b border-ink-800">
-        <h2 className="text-base font-semibold text-neutral-100">
-          Home
-        </h2>
+        <h2 className="text-base font-semibold text-neutral-100">{title}</h2>
         <button
           onClick={refresh}
           className="text-sm text-neutral-500 hover:text-neutral-200"
@@ -187,14 +202,16 @@ export default function ReaderFeed({
         <p className="text-sm text-neutral-500 px-6 py-8">Loading…</p>
       )}
       {items?.length === 0 && (
-        <p className="text-sm text-neutral-500 px-6 py-8">
-          No posts yet — write one from the Draft tab, or follow a publisher from the
-          Following tab.
-        </p>
+        <p className="text-sm text-neutral-500 px-6 py-8">{emptyMessage}</p>
       )}
 
       {items && items.length > 0 && (
-        <FeedItemsList items={items} opening={opening} onOpen={open} />
+        <FeedItemsList
+          items={items}
+          opening={opening}
+          onOpen={open}
+          onViewAuthor={onViewAuthor}
+        />
       )}
     </div>
   );

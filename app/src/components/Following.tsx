@@ -1,12 +1,5 @@
 import { useEffect, useState } from "react";
-import {
-  delegate,
-  type FeedItem,
-  type FollowedPublisher,
-  type OpenedPost,
-} from "../lib/delegate";
-import { FeedItemsList } from "./FeedItemsList";
-import OpenedPostView from "./OpenedPostView";
+import { delegate, type FollowedPublisher } from "../lib/delegate";
 import { shortHex } from "../lib/format";
 
 const inputClass =
@@ -17,24 +10,26 @@ type FollowStatus =
   | { kind: "following" }
   | { kind: "error"; message: string };
 
-export default function Following() {
+/// Follow-management only - the followed feed itself now lives on the Home
+/// tab (`get_following_feed`, see App.tsx), so this doesn't duplicate it.
+/// The paste-a-pubkey box here is the only way to follow a publisher you
+/// haven't already seen a post from; `PublisherProfileView.tsx`'s Follow
+/// button (reached by clicking an author's name in any feed) is the other,
+/// more common path.
+export default function Following({
+  onViewAuthor,
+}: {
+  onViewAuthor: (authorPubkey: string) => void;
+}) {
   const [followed, setFollowed] = useState<FollowedPublisher[] | null>(null);
-  const [items, setItems] = useState<FeedItem[] | null>(null);
   const [pubkeyInput, setPubkeyInput] = useState("");
   const [followStatus, setFollowStatus] = useState<FollowStatus>({ kind: "idle" });
-  const [selected, setSelected] = useState<OpenedPost | null>(null);
-  const [opening, setOpening] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   async function refresh() {
     setError(null);
     try {
-      const [publishers, feed] = await Promise.all([
-        delegate.listFollowedPublishers(),
-        delegate.getFollowingFeed(),
-      ]);
-      setFollowed(publishers);
-      setItems(feed);
+      setFollowed(await delegate.listFollowedPublishers());
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -70,34 +65,6 @@ export default function Following() {
     }
   }
 
-  async function open(item: FeedItem) {
-    if (item.locked) return;
-    setOpening(item.post_id);
-    setError(null);
-    try {
-      if (!item.post_contract_id) {
-        throw new Error("this post hasn't synced to the network yet - try again later");
-      }
-      const detail = await delegate.getRemotePost(item.post_contract_id);
-      setSelected({
-        post_id: item.post_id,
-        title: item.title,
-        markdown: detail.markdown,
-        author_pubkey: item.author_pubkey,
-        author_display_name: item.author_display_name,
-        is_own: false,
-      });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setOpening(null);
-    }
-  }
-
-  if (selected) {
-    return <OpenedPostView post={selected} onBack={() => setSelected(null)} />;
-  }
-
   return (
     <div className="max-w-2xl mx-auto">
       <div className="px-6 py-4 border-b border-ink-800">
@@ -122,26 +89,40 @@ export default function Following() {
           <p className="text-sm text-red-400 mt-2">{followStatus.message}</p>
         )}
         <p className="text-xs text-neutral-600 mt-2">
-          There's no publisher directory yet — paste a publisher's Ed25519 pubkey (the
-          "Your publication key" hex string shown on their Subscribers tab) to follow them.
+          Click a publisher's name from the Home, Latest, or another post's author to follow
+          them from their profile - or paste their Ed25519 pubkey (the "Your publication key"
+          hex string shown on their Subscribers tab) here if you don't have a post of theirs
+          to click yet.
         </p>
       </div>
 
+      {error && <p className="text-sm text-red-400 px-6 pt-4">{error}</p>}
+
+      {followed === null && !error && (
+        <p className="text-sm text-neutral-500 px-6 py-8">Loading…</p>
+      )}
+      {followed?.length === 0 && (
+        <p className="text-sm text-neutral-500 px-6 py-8">
+          You're not following anyone yet — paste a publisher's pubkey above to get started.
+        </p>
+      )}
+
       {followed && followed.length > 0 && (
-        <div className="px-6 py-4 border-b border-ink-800 space-y-2">
+        <div className="px-6 py-4 space-y-2">
           {followed.map((f) => (
             <div
               key={f.author_pubkey}
               className="flex items-center justify-between rounded-lg border border-ink-700 bg-ink-900 p-3"
             >
-              <div className="min-w-0">
-                <p className="text-sm font-medium text-neutral-200 truncate">
+              <button
+                onClick={() => onViewAuthor(f.author_pubkey)}
+                className="min-w-0 text-left"
+              >
+                <p className="text-sm font-medium text-neutral-200 truncate hover:underline">
                   {f.display_name}
                 </p>
-                <p className="text-xs text-neutral-500 font-mono">
-                  {shortHex(f.author_pubkey)}
-                </p>
-              </div>
+                <p className="text-xs text-neutral-500 font-mono">{shortHex(f.author_pubkey)}</p>
+              </button>
               <button
                 onClick={() => unfollow(f.author_pubkey)}
                 className="text-xs text-neutral-500 hover:text-red-400 whitespace-nowrap"
@@ -151,30 +132,6 @@ export default function Following() {
             </div>
           ))}
         </div>
-      )}
-
-      {error && <p className="text-sm text-red-400 px-6 pt-4">{error}</p>}
-
-      {followed?.length === 0 && (
-        <p className="text-sm text-neutral-500 px-6 py-8">
-          You're not following anyone yet — paste a publisher's pubkey above to get started.
-        </p>
-      )}
-
-      {followed && followed.length > 0 && (
-        <>
-          {items === null && !error && (
-            <p className="text-sm text-neutral-500 px-6 py-8">Loading…</p>
-          )}
-          {items?.length === 0 && (
-            <p className="text-sm text-neutral-500 px-6 py-8">
-              No posts yet from anyone you follow.
-            </p>
-          )}
-          {items && items.length > 0 && (
-            <FeedItemsList items={items} opening={opening} onOpen={open} />
-          )}
-        </>
       )}
     </div>
   );

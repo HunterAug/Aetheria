@@ -11,10 +11,17 @@ export function FeedItemsList({
   items,
   opening,
   onOpen,
+  onViewAuthor,
 }: {
   items: FeedItem[];
   opening: string | null;
   onOpen: (item: FeedItem) => void;
+  /// Omitted entirely for a context where there's nowhere sensible to send
+  /// the click (there isn't one today - always passed - but kept optional so
+  /// a future caller isn't forced to invent a no-op). Never called for
+  /// `item.is_own` - the author name renders as plain text there instead of
+  /// a button that would just navigate to yourself.
+  onViewAuthor?: (authorPubkey: string) => void;
 }) {
   return (
     <ul className="divide-y divide-ink-800">
@@ -33,9 +40,18 @@ export function FeedItemsList({
             </div>
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2 text-sm flex-wrap">
-                <span className="font-semibold text-neutral-100">
-                  {item.author_display_name}
-                </span>
+                {!item.is_own && onViewAuthor ? (
+                  <button
+                    onClick={() => onViewAuthor(item.author_pubkey)}
+                    className="font-semibold text-neutral-100 hover:underline"
+                  >
+                    {item.author_display_name}
+                  </button>
+                ) : (
+                  <span className="font-semibold text-neutral-100">
+                    {item.author_display_name}
+                  </span>
+                )}
                 {item.is_own && (
                   <span className="text-xs bg-aeblue-500/15 text-aeblue-400 px-1.5 py-0.5 rounded">
                     You

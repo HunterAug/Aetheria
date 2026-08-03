@@ -14,6 +14,9 @@ crypto flows, and the 16-week roadmap).
   - `publisher-profile-contract/`, `content-index-contract/`,
     `post-data-contract/`, `subscriber-registry-contract/` — one crate per
     contract from design doc §3.
+  - `global-directory-contract/` — **not** in the design doc; backs the
+    Latest (network-wide) feed. See "Home = following-only feed, Latest =
+    network-wide feed" below for why it exists.
 - `delegate/` — native Rust daemon (Tokio), Layer 2. Owns keys, crypto,
   Freenet bridge, NWC payments, local SQLite cache. Never expose key
   material or ciphertext across the IPC boundary to the UI — only decrypted
@@ -818,6 +821,109 @@ publisher's exact contract keys and `FreenetBridge::get_state` them directly.
   with a disabled open button rather than attempting - and failing - a
   decrypt.
 
+## Home = following-only feed, Latest = network-wide feed, real profile pages (as of 2026-08-03)
+
+The user's own framing, for context: Home used to feel "basically like the
+profile view" - on an account following nobody, `get_home_feed`'s own+
+followed merge degenerated to just your own posts. Redesigned as:
+
+- **Home** (`get_following_feed`, unchanged from before) - posts from people
+  you follow, and *only* those - no own-post merge anymore.
+- **Latest** (new) - the most recent posts from *every* publisher on the
+  network, own included, via a brand-new shared contract (below). This is
+  the actual "discover people you haven't followed yet" surface; there was
+  no way to do this at all before (see the "Known stub" bullet this
+  replaces).
+- **Following tab** - trimmed to pure follow-management (paste-a-pubkey box
+  + followed list); the feed itself moved to Home, so showing it twice was
+  redundant.
+- **Publisher profile pages** (new, `PublisherProfileView.tsx`) - clicking
+  any non-own author's name in *any* feed (Home, Latest, or an opened post)
+  now opens their real profile (network-fetched and signature-verified, same
+  `fetch_remote_profile` Following already used) with a Follow/Unfollow
+  button - the more common way to follow someone now, vs. Following's
+  paste-a-pubkey box (kept for the case where you don't have a post of
+  theirs to click yet).
+- **Subscribers vs. Subscriptions** - split what used to be one dual-purpose
+  `SubscriberPortal.tsx` into two: `SubscriberPortal.tsx` ("Subscribers") is
+  now publisher-side only (your tiers, read-only; your subscribers; your
+  key) - the wallet-connect-and-pay UI didn't belong on your own dashboard.
+  `Subscriptions.tsx` ("Subscriptions", new) is reader-side: wallet connect,
+  plus a real "Subscribe" button for every publisher you follow. See below
+  for why that button (correctly) always errors today.
+
+### GlobalDirectoryContract - the "everyone" list
+
+Not in the design doc - there was never a spec for network-wide discovery
+(checked the PDF directly before building this: contracts are `PublisherProfile`
+/ `ContentIndexContract` / `SubscriberRegistryContract` / `PostDataContract`,
+nothing else). `contracts/global-directory-contract/` (new crate, mirrors
+`content-index-contract`'s structure/CRDT-merge-by-`post_id` shape) is a
+single, well-known-key, globally-shared contract every publisher's delegate
+appends to on every successful publish (`ipc.rs::handle_publish_post`, via
+`contracts::publish_to_global_directory` - best-effort, same "don't fail the
+whole publish over this" philosophy as everything else in that function).
+
+- **Deterministic singleton key**: `contracts::global_directory_key()` uses
+  **empty** `Parameters` (every other contract in this app scopes params to
+  a publisher's pubkey) - so unlike everything else here, this isn't "any
+  delegate can derive *this publisher's* key", it's "every delegate derives
+  the exact same one key for the whole network", with no discovery/pointer
+  field, same `ContractKey::from_params_and_code` trick used everywhere else
+  in `contracts.rs`.
+- **Bootstrap**: `publish_to_global_directory` GETs first; if nothing exists
+  yet it PUTs a fresh one, otherwise it UPDATEs. `put_new` against an
+  already-existing key is unexplored territory in this codebase (every other
+  contract here has exactly one authoritative publisher, so this never came
+  up before) - checking first narrows but doesn't eliminate the race if two
+  delegates bootstrap simultaneously; left to Freenet's own handling for that
+  case, since the loser's *next* publish still merges its entry in via the
+  update path regardless.
+- **Capped at 1000 entries** (`GLOBAL_DIRECTORY_MAX_ENTRIES` in
+  `contracts.rs`, `MAX_ENTRIES` in the contract crate - keep these two in
+  sync by hand, same caveat as every other hand-mirrored state struct in this
+  file), newest-first, oldest evicted on merge - the user's own suggestion,
+  and the closest thing this app has to design doc §7's Sybil-spam
+  mitigation (still no real proof-of-work/payment gate).
+- **Per-entry signatures**: unlike `ContentIndexContract` (one publisher, one
+  verifying key for the whole state), this contract holds entries from many
+  different authors, so each `GlobalDirectoryEntry` carries its own
+  signature, checked independently against its own `author_pubkey` by
+  `contracts::fetch_global_directory` - a bad/tampered entry is dropped
+  (logged), not treated as a reason to distrust every other real entry.
+- **Locked-post teasers**: a `SubscriberOnly` post from someone else still
+  appears in Latest (and Home, and a profile page) with its real title/
+  summary and a lock badge, exactly like Following already did - this was
+  the user's explicit ask ("still see that a subscriber-only post was made,
+  just not the details, to entice a subscribe"), and it turned out to
+  already be exactly how the existing `locked` flag worked; the only
+  backend change needed was applying the same `is_own`-gated rule
+  (`ipc.rs::feed_item_json`, factored out of the old per-feed-handler
+  duplication) to the new feeds too.
+
+**Verified live, 2026-08-03**: two genuinely independent identities (fresh
+scratch `AETHERIA_DATA_DIR_OVERRIDE` dirs, real release delegate binary, real
+running Freenet node) driven sequentially through the real IPC protocol by a
+script at the same rigor as `follow_publisher_e2e_test.rs` (not checked into
+the repo - throwaway verification tooling): Alice published a public and a
+subscriber-only post; Bob published a public post; Bob's `get_latest_feed`
+showed all three with correct `locked`/`is_own` flags and newest-first sort;
+`get_publisher_profile` returned Alice's real signed profile + posts, `is_following: false`
+before and `true` after `follow_publisher`; Bob's `get_following_feed` showed
+only Alice's two posts (subscriber one still locked); `subscribe` to Alice's
+pubkey rejected immediately with the documented error; `unfollow_publisher`
+correctly emptied the following feed again. Also driven through the real
+browser UI (Vite dev server) against a real delegate: Home empty until
+following someone, Latest showing real cross-identity data with correct
+locked/You badges (including correctly treating two *different* real
+identities that happened to share a display name as distinct, since the
+locked check is keyed on pubkey, not name), clicking an author's name
+opening their real profile, Follow working live and Home updating to match,
+Following tab showing management-only (no duplicate feed), Subscriptions
+showing a real wallet-connect flow and an honest per-publisher error, and
+Subscribers showing publisher-side-only content with no wallet/Subscribe UI
+left on it.
+
 ## Known stub / unimplemented areas
 
 - `FreenetBridge::subscribe` — sends nothing, still `todo!()`
@@ -849,10 +955,13 @@ publisher's exact contract keys and `FreenetBridge::get_state` them directly.
   is real, tested, and ready for the day this channel exists; nothing calls
   it from the Following path yet.
 - Subscribing (paying via NWC) to a publication other than this delegate's
-  own identity - Following only covers *reading*, not the NWC/ECDH-key-bundle
-  flow; that flow's own docs above already note "no browsing UI exists yet"
-  for the same underlying reason (no discovery mechanism), now narrowed
-  specifically to the subscribe-and-pay path since read-only following is
-  solved.
+  own identity - **has a real UI now** (`Subscriptions.tsx`, see the "Home,
+  Latest feed" section below), but every target other than yourself rejects
+  immediately with a clear error (`handle_subscribe` in `ipc.rs`) rather than
+  attempting anything, for the same underlying reason as the bullet above:
+  no channel exists for a reader to learn a stranger's secp256k1 key. Real,
+  scoped-down-on-purpose (see that section for the decision), not a silent
+  gap.
 - Proof-of-work spam mitigation (design doc §7) and the pinning daemon
-  (§7, §8 Phase 4) are not started.
+  (§7, §8 Phase 4) are not started. The Latest feed's 1000-entry cap (see
+  below) is the closest thing to spam mitigation any part of this app has.

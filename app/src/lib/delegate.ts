@@ -45,15 +45,23 @@ export interface Tier {
 }
 
 export interface SubscriptionInfo {
-  /// This publication's Ed25519 pubkey (hex) - what a reader's Delegate
-  /// would use to locate the `SubscriberRegistryContract` on Freenet.
+  /// The target publication's Ed25519 pubkey (hex) - what a reader's
+  /// Delegate would use to locate the `SubscriberRegistryContract` on
+  /// Freenet. Echoes back whichever pubkey `getSubscriptionInfo` was called
+  /// with (or this delegate's own, if omitted).
   publisher_pubkey: string;
   /// This delegate's own secp256k1 identity pubkey (hex, compressed) - the
   /// `EncryptedKeyBundle.subscriber_pubkey` a bundle addressed to "you"
-  /// would be keyed on.
+  /// would be keyed on. Constant regardless of `publisher_pubkey` - it's
+  /// always about *this* delegate's reader identity.
   subscriber_pubkey: string;
   tiers: Tier[];
   wallet_connected: boolean;
+  /// `false` for any `publisher_pubkey` other than this delegate's own -
+  /// there's no channel yet for a reader to learn a stranger's secp256k1
+  /// key, so `subscribe` will reject immediately for those (see
+  /// `Subscriptions.tsx`, and CLAUDE.md's "Known stub" section).
+  subscribable: boolean;
 }
 
 export interface SubscribeResult {
@@ -70,10 +78,11 @@ export interface SubscriberEntry {
   issued_at: number;
 }
 
-/// One entry in the merged Home feed or the Following-only feed - a post
-/// from either this delegate's own publication or a followed publisher's
-/// `ContentIndexContract`, fetched live over the real network (see
-/// `delegate/src/ipc.rs`'s `handle_get_home_feed`/`handle_get_following_feed`).
+/// One entry in the Home (following) feed, the Latest (network-wide) feed,
+/// or a publisher profile's post list - fetched live over the real network
+/// (see `delegate/src/ipc.rs`'s `handle_get_following_feed`/
+/// `handle_get_latest_feed`/`handle_get_publisher_profile`, which all share
+/// this same shape via `feed_item_json`).
 export interface FeedItem {
   post_id: string;
   title: string;
@@ -113,6 +122,20 @@ export interface FollowResult extends FollowedPublisher {
 export interface RemotePostDetail {
   post_contract_id: string;
   markdown: string;
+}
+
+/// Another publisher's profile page - their real, network-verified
+/// `PublisherProfileContract` plus their recent posts, for viewing (and
+/// optionally following) someone reached by clicking an author's name in
+/// any feed.
+export interface PublisherProfileData {
+  author_pubkey: string;
+  display_name: string;
+  bio: string;
+  avatar_freenet_key: string | null;
+  is_own: boolean;
+  is_following: boolean;
+  posts: FeedItem[];
 }
 
 export interface LockStatus {
@@ -249,15 +272,27 @@ class DelegateClient {
     return this.call("connect_wallet", { uri });
   }
 
-  getSubscriptionInfo(): Promise<SubscriptionInfo> {
-    return this.call("get_subscription_info");
+  /// Omit `authorPubkey` (or pass this delegate's own) for the classic
+  /// self-subscribe path. Any other target comes back with
+  /// `subscribable: false` - see `SubscriptionInfo.subscribable`.
+  getSubscriptionInfo(authorPubkey?: string): Promise<SubscriptionInfo> {
+    return this.call(
+      "get_subscription_info",
+      authorPubkey ? { author_pubkey: authorPubkey } : {},
+    );
   }
 
   /// Pays for `tier_id` via the connected wallet, then (once settlement is
   /// verified) delivers an ECDH-encrypted epoch key bundle. Requires a
-  /// wallet to already be connected via `connectWallet`.
-  subscribe(tierId: number): Promise<SubscribeResult> {
-    return this.call("subscribe", { tier_id: tierId });
+  /// wallet to already be connected via `connectWallet`. `authorPubkey`
+  /// omitted (or equal to this delegate's own) is the only target that
+  /// actually works today - anything else rejects immediately with a clear
+  /// "not supported yet" error (see `SubscriptionInfo.subscribable`).
+  subscribe(tierId: number, authorPubkey?: string): Promise<SubscribeResult> {
+    return this.call("subscribe", {
+      tier_id: tierId,
+      ...(authorPubkey ? { author_pubkey: authorPubkey } : {}),
+    });
   }
 
   listSubscribers(): Promise<SubscriberEntry[]> {
@@ -280,15 +315,25 @@ class DelegateClient {
     return this.call("list_followed_publishers");
   }
 
-  /// This delegate's own posts merged with every followed publisher's posts,
-  /// sorted by recency.
-  getHomeFeed(): Promise<FeedItem[]> {
-    return this.call("get_home_feed");
-  }
-
-  /// Followed publishers' posts only - backs the Following tab.
+  /// Every followed publisher's posts, sorted by recency - backs the Home
+  /// tab.
   getFollowingFeed(): Promise<FeedItem[]> {
     return this.call("get_following_feed");
+  }
+
+  /// The most recent posts from *every* publisher on the network (own posts
+  /// included), via the shared network-wide directory - backs the Latest
+  /// tab. See CLAUDE.md's "Latest feed" section for what backs this (no
+  /// discovery service existed before it).
+  getLatestFeed(): Promise<FeedItem[]> {
+    return this.call("get_latest_feed");
+  }
+
+  /// Fetches (and verifies) another publisher's profile plus their recent
+  /// posts - the "view a publisher's profile page" screen reached by
+  /// clicking an author's name in any feed.
+  getPublisherProfile(authorPubkey: string): Promise<PublisherProfileData> {
+    return this.call("get_publisher_profile", { author_pubkey: authorPubkey });
   }
 
   /// Opens a `public`-access post from another publisher. Throws if the

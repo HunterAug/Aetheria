@@ -555,6 +555,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "global-directory-contract"
+version = "0.1.0"
+dependencies = [
+ "aetheria-types",
+ "ciborium",
+ "freenet-stdlib",
+ "serde",
+]
+
+[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -13,13 +13,16 @@ export default function OpenedPostView({
   post,
   onBack,
   onOpenProfile,
+  onViewAuthor,
 }: {
   post: OpenedPost;
   onBack: () => void;
-  /// Only meaningful for `post.is_own` - there's no profile view yet for a
-  /// followed publisher (see CLAUDE.md's discovery-UI gap), so this is
-  /// omitted entirely by `Following.tsx`.
+  /// Only meaningful for `post.is_own` - navigates to this delegate's own
+  /// Profile tab.
   onOpenProfile?: () => void;
+  /// Only meaningful for `!post.is_own` - navigates to the author's
+  /// publisher profile page.
+  onViewAuthor?: (authorPubkey: string) => void;
 }) {
   const authorInner = (
     <>
@@ -32,6 +35,12 @@ export default function OpenedPostView({
     </>
   );
 
+  const authorClickHandler = post.is_own
+    ? onOpenProfile
+    : onViewAuthor
+      ? () => onViewAuthor(post.author_pubkey)
+      : undefined;
+
   return (
     <div className="px-6 py-5 max-w-2xl mx-auto">
       <button
@@ -40,8 +49,8 @@ export default function OpenedPostView({
       >
         ← Back to feed
       </button>
-      {post.is_own && onOpenProfile ? (
-        <button onClick={onOpenProfile} className="flex items-center gap-2 mb-3 group">
+      {authorClickHandler ? (
+        <button onClick={authorClickHandler} className="flex items-center gap-2 mb-3 group">
           {authorInner}
         </button>
       ) : (

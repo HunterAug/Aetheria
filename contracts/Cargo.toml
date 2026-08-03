@@ -6,6 +6,7 @@ members = [
     "content-index-contract",
     "post-data-contract",
     "subscriber-registry-contract",
+    "global-directory-contract",
 ]
 
 [workspace.package]

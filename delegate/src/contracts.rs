@@ -24,7 +24,10 @@
 //! either contract's state shape changes.
 
 use crate::{db::LocalStore, freenet_bridge::FreenetBridge, keys::DelegateKeys};
-use aetheria_types::{AccessTier, EncryptedKeyBundle, EncryptedPostPayload, PostMetadataHeader, Tier};
+use aetheria_types::{
+    AccessTier, EncryptedKeyBundle, EncryptedPostPayload, GlobalDirectoryEntry, PostMetadataHeader,
+    Tier,
+};
 use anyhow::{Context, Result};
 use ed25519_dalek::{Signature, Signer, VerifyingKey};
 use freenet_stdlib::prelude::{CodeHash, ContractCode, ContractInstanceId, ContractKey, Parameters};
@@ -42,6 +45,9 @@ const PUBLISHER_PROFILE_CONTRACT_WASM: &[u8] = include_bytes!(
 );
 const SUBSCRIBER_REGISTRY_CONTRACT_WASM: &[u8] = include_bytes!(
     "../../contracts/subscriber-registry-contract/build/freenet/subscriber_registry_contract"
+);
+const GLOBAL_DIRECTORY_CONTRACT_WASM: &[u8] = include_bytes!(
+    "../../contracts/global-directory-contract/build/freenet/global_directory_contract"
 );
 
 fn load_code(bytes: &'static [u8]) -> Result<Arc<ContractCode<'static>>> {
@@ -96,6 +102,28 @@ impl PublisherProfile {
 
 fn header_signable_bytes(header: &PostMetadataHeader) -> Vec<u8> {
     let mut unsigned = header.clone();
+    unsigned.signature = [0u8; 64];
+    let mut buf = Vec::new();
+    ciborium::into_writer(&unsigned, &mut buf).expect("cbor serialization is infallible");
+    buf
+}
+
+/// Mirror of `global_directory_contract::GlobalDirectoryState` - see module
+/// docs for why this is hand-copied rather than imported.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct GlobalDirectoryState {
+    entries: Vec<GlobalDirectoryEntry>,
+}
+
+/// Newest kept, oldest evicted - must match
+/// `global_directory_contract::MAX_ENTRIES` exactly, since this delegate-side
+/// copy is what actually performs the truncation before every PUT/UPDATE (the
+/// WASM contract's own `validate_state` only rejects an already-too-long
+/// state, it doesn't truncate one itself - see that crate's module docs).
+const GLOBAL_DIRECTORY_MAX_ENTRIES: usize = 1000;
+
+fn global_directory_entry_signable_bytes(entry: &GlobalDirectoryEntry) -> Vec<u8> {
+    let mut unsigned = entry.clone();
     unsigned.signature = [0u8; 64];
     let mut buf = Vec::new();
     ciborium::into_writer(&unsigned, &mut buf).expect("cbor serialization is infallible");
@@ -733,6 +761,150 @@ pub async fn fetch_remote_post_payload(
         .context("fetching remote PostDataContract state")?
         .ok_or_else(|| anyhow::anyhow!("post contract not found on the network"))?;
     ciborium::from_reader(bytes.as_slice()).context("decoding remote EncryptedPostPayload")
+}
+
+// ---------------------------------------------------------------------
+// GlobalDirectoryContract - backs the "Latest" feed (everyone's posts, not
+// just followed publishers'). No spec for this in the design doc; added
+// because there's otherwise no way to discover a publisher you haven't
+// already been given the pubkey for. See global-directory-contract's module
+// docs for the full design rationale (bounded to 1000 entries, the closest
+// thing to the design doc §7 Sybil-spam mitigation this pass implements).
+// ---------------------------------------------------------------------
+
+/// Deterministically computes the network's one `GlobalDirectoryContract`
+/// instance key from **empty** `Parameters` - unlike every other key
+/// derivation in this file (which scopes to one publisher via their
+/// pubkey), this is a single well-known singleton shared by the whole
+/// network, so every delegate holding the same compiled code independently
+/// arrives at the identical key with no discovery/pointer field, same trick
+/// as `subscriber_registry_key_for`.
+pub fn global_directory_key() -> Result<ContractKey> {
+    let code = load_code(GLOBAL_DIRECTORY_CONTRACT_WASM)?;
+    let params = Parameters::from(Vec::new());
+    Ok(ContractKey::from_params_and_code(&params, &*code))
+}
+
+/// Signs and appends one post's entry to the shared `GlobalDirectoryContract`,
+/// bootstrapping it with a fresh PUT if nothing has ever been published there
+/// yet (checked via a GET first, not blindly PUT - `put_new` targeting an
+/// already-existing key is unexplored territory in this codebase, unlike
+/// every other contract here which has exactly one authoritative publisher;
+/// this is the one contract multiple independent delegates might race to
+/// bootstrap, so checking first minimizes but doesn't eliminate that race -
+/// an actual double-PUT collision is left to Freenet's own conflict handling
+/// for that key, and the losing delegate's *next* publish will still merge
+/// its entry in via the update path below).
+#[allow(clippy::too_many_arguments)]
+pub async fn publish_to_global_directory(
+    freenet: &FreenetBridge,
+    keys: &DelegateKeys,
+    post_id: [u8; 16],
+    author_display_name: &str,
+    title: &str,
+    summary: &str,
+    post_contract_id: String,
+    access_level: AccessTier,
+    epoch_id: u32,
+    published_at: u64,
+) -> Result<()> {
+    let mut entry = GlobalDirectoryEntry {
+        post_id,
+        author_pubkey: keys.master_signing_verifying_bytes(),
+        author_display_name: author_display_name.to_string(),
+        title: title.to_string(),
+        summary: summary.to_string(),
+        post_contract_id,
+        access_level,
+        epoch_id,
+        published_at,
+        signature: [0u8; 64],
+    };
+    let signature = keys.master_signing.sign(&global_directory_entry_signable_bytes(&entry));
+    entry.signature = signature.to_bytes();
+
+    let key = global_directory_key()?;
+    let current = freenet
+        .get_state(*key.id())
+        .await
+        .context("fetching current GlobalDirectoryContract state")?;
+
+    match current {
+        Some(bytes) => {
+            let mut state: GlobalDirectoryState = ciborium::from_reader(bytes.as_slice())
+                .context("decoding GlobalDirectoryContract state")?;
+            state.entries.retain(|e| e.post_id != entry.post_id);
+            state.entries.push(entry);
+            state.entries.sort_by(|a, b| b.published_at.cmp(&a.published_at));
+            state.entries.truncate(GLOBAL_DIRECTORY_MAX_ENTRIES);
+
+            let mut buf = Vec::new();
+            ciborium::into_writer(&state, &mut buf)?;
+            freenet
+                .update_state(key, buf)
+                .await
+                .context("updating GlobalDirectoryContract")
+        }
+        None => {
+            let code = load_code(GLOBAL_DIRECTORY_CONTRACT_WASM)?;
+            let params = Parameters::from(Vec::new());
+            let state = GlobalDirectoryState { entries: vec![entry] };
+            let mut buf = Vec::new();
+            ciborium::into_writer(&state, &mut buf)?;
+            freenet
+                .put_new(code, params, buf)
+                .await
+                .context("publishing initial GlobalDirectoryContract")?;
+            Ok(())
+        }
+    }
+}
+
+/// Fetches the shared `GlobalDirectoryContract` and verifies each entry's
+/// signature independently against *its own* `author_pubkey` - unlike
+/// `fetch_remote_posts` (one publisher, one key to check every header
+/// against), this contract holds entries from many different authors, so
+/// there's no single verifying key to check the whole state against. An
+/// entry that fails verification is dropped (logged, not propagated as a
+/// hard error) - same "one bad entry doesn't hide everyone else's real
+/// posts" philosophy as `fetch_remote_posts`.
+pub async fn fetch_global_directory(freenet: &FreenetBridge) -> Result<Vec<GlobalDirectoryEntry>> {
+    let key = global_directory_key()?;
+    let Some(bytes) = freenet
+        .get_state(*key.id())
+        .await
+        .context("fetching GlobalDirectoryContract state")?
+    else {
+        return Ok(Vec::new());
+    };
+    let state: GlobalDirectoryState = ciborium::from_reader(bytes.as_slice())
+        .context("decoding GlobalDirectoryContract state")?;
+
+    Ok(state
+        .entries
+        .into_iter()
+        .filter(|entry| {
+            let Ok(verifying_key) = VerifyingKey::from_bytes(&entry.author_pubkey) else {
+                tracing::warn!(
+                    author_pubkey = %hex_encode(&entry.author_pubkey),
+                    "dropping global directory entry with an invalid author_pubkey"
+                );
+                return false;
+            };
+            let signature = Signature::from_bytes(&entry.signature);
+            let ok = verifying_key
+                .verify_strict(&global_directory_entry_signable_bytes(entry), &signature)
+                .is_ok();
+            if !ok {
+                tracing::warn!(
+                    post_id = %hex_encode(&entry.post_id),
+                    author_pubkey = %hex_encode(&entry.author_pubkey),
+                    "dropping global directory entry with an invalid signature"
+                );
+            }
+            ok
+        })
+        .collect())
 }
 
 fn hex_encode(bytes: &[u8]) -> String {

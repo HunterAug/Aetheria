@@ -2,20 +2,24 @@ import {
   EditIcon,
   FollowingIcon,
   GearIcon,
+  GlobeIcon,
   HomeIcon,
   InfoIcon,
   PlusIcon,
   UserIcon,
   UsersIcon,
+  WalletIcon,
 } from "./icons";
 import type { Tab } from "../App";
 
 const NAV: { id: Tab; label: string; icon: (p: { className?: string }) => JSX.Element }[] = [
   { id: "feed", label: "Home", icon: HomeIcon },
+  { id: "latest", label: "Latest", icon: GlobeIcon },
   { id: "following", label: "Following", icon: FollowingIcon },
   { id: "editor", label: "Draft", icon: EditIcon },
   { id: "profile", label: "Profile", icon: UserIcon },
   { id: "subscribers", label: "Subscribers", icon: UsersIcon },
+  { id: "subscriptions", label: "Subscriptions", icon: WalletIcon },
   { id: "about", label: "About", icon: InfoIcon },
   { id: "settings", label: "Settings", icon: GearIcon },
 ];

@@ -66,6 +66,34 @@ pub struct EncryptedPostPayload {
     pub attachments: Vec<MediaAttachment>,
 }
 
+/// One entry in the network-wide `GlobalDirectoryContract`'s bounded
+/// recent-posts list (backs the "Latest" feed - everyone's posts, not just
+/// followed publishers'). Not part of the original design doc's contract
+/// set: unlike `PostMetadataHeader` (scoped to one publication's own
+/// `ContentIndexContract`), this is a single shared, globally-writable
+/// contract many different publishers' delegates append to, so each entry
+/// has to carry its own author identity rather than relying on the
+/// containing contract's `publication_id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GlobalDirectoryEntry {
+    pub post_id: [u8; 16],
+    /// Ed25519 pubkey of whoever published this post.
+    pub author_pubkey: [u8; 32],
+    pub author_display_name: String,
+    pub title: String,
+    pub summary: String,
+    pub post_contract_id: String,
+    pub access_level: AccessTier,
+    pub epoch_id: u32,
+    pub published_at: u64,
+    /// Ed25519 signature over the entry bytes, by `author_pubkey`'s matching
+    /// signing key - verified independently per-entry by whoever fetches
+    /// this contract, since (unlike a per-publication index) many different
+    /// authors write into the one shared state here.
+    #[serde(with = "BigArray")]
+    pub signature: [u8; 64],
+}
+
 /// Encrypted Kepoch bundle for a single subscriber, produced via
 /// ECDH(SKpub, PKsub,i) and stored in the `SubscriberRegistryContract`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
