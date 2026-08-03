@@ -34,6 +34,9 @@ app/src-tauri/binaries/
 /.claude/skills/
 skills-lock.json
 
+# Machine-local Claude Code permission state, not project config.
+/.claude/settings.local.json
+
 # Local SQLite / Delegate runtime data (real location is the OS app-data
 # dir via `directories::ProjectDirs`, not this repo - these patterns are
 # just a safety net in case a build ever writes locally).
