@@ -1,0 +1,51 @@
+@import "tailwindcss";
+
+:root {
+  --background: #0a0a0d;
+  --foreground: #ededed;
+}
+
+/* Same palette as app/tailwind.config.js (the desktop app) - derived from
+   logo.png's gradient mark - so the marketing site and the product look
+   like the same thing. */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+
+  --color-aeblue-400: #7c9bff;
+  --color-aeblue-500: #5b7cfa;
+  --color-aeblue-600: #4661e0;
+
+  --color-aepurple-400: #c08bff;
+  --color-aepurple-500: #a866f0;
+  --color-aepurple-600: #8c4fd6;
+
+  --color-aecyan-400: #4fd8f5;
+  --color-aecyan-500: #22c3e6;
+
+  --color-ink-950: #0a0a0d;
+  --color-ink-900: #121216;
+  --color-ink-850: #17171d;
+  --color-ink-800: #1e1e26;
+  --color-ink-700: #2a2a34;
+  --color-ink-600: #3a3a46;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+.aetheria-gradient {
+  background-image: linear-gradient(135deg, #5b7cfa 0%, #a866f0 100%);
+}
+
+.aetheria-gradient-text {
+  background-image: linear-gradient(135deg, #7c9bff 0%, #c08bff 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}

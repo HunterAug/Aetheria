@@ -1,0 +1,123 @@
+# Periodically refreshes website/public/data/latest-feed.json - the static
+# snapshot backing the marketing site's read-only /latest page (see
+# website/CLAUDE.md for why this is a periodic snapshot rather than a live
+# connection: Vercel's serverless functions can't run a persistent Freenet
+# node).
+#
+# Runs a real (unmodified) Freenet node just long enough to fetch the shared
+# GlobalDirectoryContract via delegate/src/bin/snapshot_latest_feed.rs (a
+# read-only tool - no keys, no writes, see that file's docs), then commits
+# the result if it changed. Pushing to main triggers Vercel's normal
+# git-push deploy for website/, so the deployed page picks up the refresh
+# automatically.
+#
+# NOTE: written and compile/logic-reviewed carefully, but a real run on
+# GitHub's own infrastructure hasn't been observed from this environment (no
+# `gh` CLI available here - see root CLAUDE.md's environment notes). Check
+# the Actions tab after this first merges to confirm it actually goes green
+# end to end, especially the "wait for Freenet to bind + get initial peer
+# connections" timing - the real gateway network's own connect latency
+# (documented at length in root CLAUDE.md) is the main real risk to this
+# working reliably on the first few scheduled runs.
+
+name: Refresh Latest-feed snapshot
+
+on:
+  schedule:
+    # Every 30 minutes. GitHub's scheduler is best-effort, not exact.
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      # Two independent caches: cargo-installed tools (freenet, fdev - these
+      # change roughly never) and the compiled contract WASM (changes only
+      # when contract source does). Splitting them means a contract-only
+      # change doesn't force reinstalling freenet/fdev from source, which is
+      # the slow part (a real node + dev CLI, several minutes to compile).
+      - name: Cache cargo-installed tools
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin
+          key: cargo-tools-freenet-fdev-v1
+
+      - name: Cache compiled contract WASM
+        uses: actions/cache@v4
+        with:
+          path: contracts/*/build/
+          key: contract-wasm-${{ hashFiles('contracts/**/*.rs', 'contracts/**/Cargo.toml') }}
+
+      - name: Install freenet + fdev (if not cached)
+        run: |
+          command -v freenet >/dev/null || cargo install freenet --locked
+          command -v fdev >/dev/null || cargo install fdev --locked
+
+      # `fdev build` has a known bug (see root CLAUDE.md's environment
+      # notes): its own get_workspace_target_dir() bakes in
+      # env!("CARGO_MANIFEST_DIR") from *fdev's own* compile time (wherever
+      # `cargo install` put the registry cache), not the caller's actual
+      # working directory, so it panics "Could not find workspace root"
+      # unless CARGO_TARGET_DIR is set explicitly to short-circuit that
+      # lookup. This happens on any machine that cargo-installs fdev, not
+      # just the original dev machine - same workaround applies here.
+      - name: Build contract WASM (skipped if cache hit)
+        run: |
+          for contract in post-data-contract content-index-contract publisher-profile-contract subscriber-registry-contract global-directory-contract; do
+            if [ ! -f "contracts/$contract/build/freenet/${contract//-/_}" ]; then
+              echo "==> fdev build $contract"
+              (cd "contracts/$contract" && CARGO_TARGET_DIR=./target fdev build)
+            else
+              echo "==> $contract already built (cache hit)"
+            fi
+          done
+
+      - name: Build snapshot tool
+        run: cargo build --release --bin snapshot-latest-feed --manifest-path delegate/Cargo.toml
+
+      - name: Start Freenet node
+        run: |
+          nohup freenet network > freenet.log 2>&1 &
+          echo $! > freenet.pid
+          echo "==> waiting for Freenet's WS API to bind..."
+          for i in $(seq 1 60); do
+            (exec 3<>/dev/tcp/127.0.0.1/7509) 2>/dev/null && { exec 3<&-; break; }
+            sleep 2
+          done
+          # A freshly-started node with zero prior peers needs real time
+          # beyond "port is open" to get useful ring connections (see root
+          # CLAUDE.md's "real network is flaky" note) - the snapshot tool's
+          # own GET call already retries with backoff on top of this, so
+          # this is a head start, not the only thing standing between a
+          # cold node and a successful fetch.
+          echo "==> giving it time to find peers..."
+          sleep 30
+
+      - name: Run snapshot
+        run: ./delegate/target/release/snapshot-latest-feed > website/public/data/latest-feed.json
+
+      - name: Stop Freenet node
+        if: always()
+        run: kill "$(cat freenet.pid)" 2>/dev/null || true
+
+      - name: Show Freenet log on failure
+        if: failure()
+        run: cat freenet.log || true
+
+      - name: Commit snapshot if it changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add website/public/data/latest-feed.json
+          git diff --cached --quiet || git commit -m "Refresh Latest-feed snapshot [skip ci]"
+          git push

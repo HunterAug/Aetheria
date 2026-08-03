@@ -4,9 +4,20 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 
+[lib]
+name = "aetheria_delegate"
+path = "src/lib.rs"
+
 [[bin]]
 name = "aetheria-delegate"
 path = "src/main.rs"
+
+[[bin]]
+# Read-only tool feeding the marketing website's "Latest posts" snapshot -
+# see CLAUDE.md's "Dev scripts" section. No keys, no writes, just a GET
+# against the shared GlobalDirectoryContract.
+name = "snapshot-latest-feed"
+path = "src/bin/snapshot_latest_feed.rs"
 
 [dependencies]
 aetheria-types = { path = "../contracts/aetheria-types" }

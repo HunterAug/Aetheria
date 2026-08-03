@@ -6,29 +6,13 @@
 //! SQLite cache of decrypted content so the UI never has to touch key
 //! material or ciphertext directly.
 //!
-//! This is a Phase 2 scaffold: modules define the intended shape of each
-//! subsystem but most bodies are `todo!()` pending the real Freenet
-//! websocket API and NWC relay wiring.
+//! Thin wrapper around the `aetheria_delegate` library crate (see
+//! `src/lib.rs`) - the actual subsystems live there so
+//! `src/bin/snapshot_latest_feed.rs` can reuse them too.
 
-mod contracts;
-mod crypto;
-mod db;
-mod freenet_bridge;
-mod ipc;
-mod keys;
-mod nwc;
-#[cfg(test)]
-mod follow_publisher_e2e_test;
-#[cfg(test)]
-mod subscriber_registry_e2e_test;
-
+use aetheria_delegate::{db, ipc, IPC_PORT};
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
-
-/// Local WebSocket port the UI (React/Tauri) connects to for IPC.
-/// Port 3000 is reserved for the frontend dev server on this machine, so the
-/// delegate listens elsewhere.
-pub const IPC_PORT: u16 = 47_021;
 
 #[tokio::main]
 async fn main() -> Result<()> {

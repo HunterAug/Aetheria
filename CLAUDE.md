@@ -20,9 +20,17 @@ crypto flows, and the 16-week roadmap).
 - `delegate/` — native Rust daemon (Tokio), Layer 2. Owns keys, crypto,
   Freenet bridge, NWC payments, local SQLite cache. Never expose key
   material or ciphertext across the IPC boundary to the UI — only decrypted
-  content and derived state.
+  content and derived state. Both a library (`src/lib.rs`, `pub mod`s for
+  `contracts`/`freenet_bridge`/etc.) and two binaries: `aetheria-delegate`
+  (`src/main.rs`, the real daemon - thin wrapper around the library) and
+  `snapshot-latest-feed` (`src/bin/`, read-only, feeds `website/`'s Latest
+  page - see below).
 - `app/` — React 18 + TypeScript + Tailwind + Tauri, Layer 1. Talks to the
   delegate only via the loopback WebSocket in `app/src/lib/delegate.ts`.
+- `website/` — separate Next.js marketing/docs site (its own `CLAUDE.md`),
+  deployed independently (Vercel) from the desktop app. Download page,
+  plain-language docs, and a read-only `/latest` feed viewer. See "Marketing
+  website" below.
 
 ## Dev scripts (as of 2026-08-03)
 
@@ -987,6 +995,79 @@ whatever tab you're on; selecting a publisher result reuses the existing
 `viewingAuthor` navigation Following/feeds already use. A locked
 (subscriber-only, someone else's) result still shows up with a lock badge,
 same convention as every other feed - just not openable.
+
+## Marketing website (as of 2026-08-03)
+
+`website/` - a separate Next.js (App Router, TypeScript, Tailwind v4) site
+for non-technical visitors: what Aetheria is, download links, plain-
+language docs, and a read-only view of real posts. Deployed independently
+of the desktop app - the user connects this repo to a Vercel project
+themselves and points a domain (registered via Wix, DNS pointed at Vercel)
+at it; **Vercel's project settings need Root Directory set to `website/`**
+since this is a monorepo. See `website/CLAUDE.md` for details scoped to
+that subproject; this section covers the cross-cutting pieces.
+
+- **Downloads are served directly from the site, not GitHub Releases** -
+  the user's explicit call. `website/public/downloads/` holds
+  `Aetheria-Setup-x64.exe` (the existing NSIS installer, bundles Freenet -
+  copy of `builds/Aetheria_0.1.0_x64-setup.exe`) and
+  `Aetheria-app-only-x64.zip` (new packaging: just `aetheria.exe` +
+  `aetheria-delegate.exe`, zipped, no bundled Freenet - for people already
+  running their own node). Both are committed to git (unusual for this repo
+  - everywhere else built binaries are gitignored, see the `scripts/`
+  section above - but there's no other artifact host in this plan, so
+  Vercel can only serve what's actually in the repo). Re-run
+  `scripts/build.sh` then re-copy/re-zip into `website/public/downloads/`
+  before any release that should reach this download page.
+- **The `/latest` page can't hold a live Freenet connection** - Vercel
+  serverless functions are stateless/ephemeral, and a fresh Freenet node
+  needs real time to get P2P ring connections (see this file's environment
+  notes on the real network being flaky/slow to connect), which doesn't fit
+  a per-request function. Solved with a periodic static snapshot instead of
+  a live connection - a real, explicit tradeoff discussed with the user
+  (the alternative, a genuinely live view, needs an always-on backend
+  server outside Vercel, real hosting cost and ops, not just git-push
+  deploys - deferred unless that tradeoff needs revisiting later):
+  - `delegate/src/bin/snapshot_latest_feed.rs` (new `[[bin]]` target,
+    reuses `contracts::fetch_global_directory` via the delegate crate's new
+    library split above - no keys, no writes, purely a GET against the
+    same shared `GlobalDirectoryContract` the app's own Latest tab reads)
+    dumps the current entries as JSON with a `generated_at` timestamp.
+  - `website/app/latest/page.tsx` is a Server Component that reads
+    `website/public/data/latest-feed.json` straight off disk
+    (`fs.readFileSync`, no client-side fetch, no API route) and shows an
+    honest "snapshot updated <time>" line rather than implying it's live.
+  - `.github/workflows/refresh-latest-feed.yml` runs on a 30-minute cron
+    (plus manual `workflow_dispatch`): installs `freenet`+`fdev` via
+    `cargo install` (cached across runs), runs `fdev build` for every
+    contract the snapshot tool's `include_bytes!`s need (same
+    `CARGO_TARGET_DIR` workaround this file already documents for `fdev
+    build`'s workspace-root bug - applies identically on a CI runner, not
+    just this dev machine), starts a real `freenet network` node, waits for
+    it to bind and get some peer time, runs the snapshot tool, and commits
+    the JSON if it changed. A push to `main` is what actually refreshes the
+    live page, via Vercel's normal git-push deploy - this workflow's commit
+    is the trigger, not a separate deploy step.
+  - **Honesty note**: written and logic-reviewed carefully (matches every
+    documented gotcha about `fdev build`/cold Freenet nodes elsewhere in
+    this file), but a real run on GitHub's own infrastructure has not been
+    observed from this environment - no `gh` CLI is installed here (see
+    environment notes above), so there's no way to trigger/inspect an
+    Actions run directly. Check the Actions tab after this first merges to
+    confirm it goes green, especially the node-connectivity timing, which
+    is the one piece genuinely outside this session's ability to verify.
+  - To refresh by hand instead: from `delegate/`, run
+    `cargo run --release --bin snapshot-latest-feed > ../website/public/data/latest-feed.json`
+    against a real reachable Freenet node, then commit the file.
+- **Verified locally, 2026-08-03**: `snapshot-latest-feed` run against the
+  real local node produced real current data (matched what the app's own
+  Latest tab shows); `npm run build` in `website/` succeeds cleanly, all
+  routes statically prerendered; loaded `/`, `/download`, `/docs/security`,
+  and `/latest` in a real browser against the Next.js dev server - `/latest`
+  rendered the real snapshot with correct locked/teaser rendering for
+  subscriber-only posts (title/summary visible, content withheld, same
+  convention as the app itself), and both download links resolved with
+  real, correct `Content-Length`s (not 404s or placeholders).
 
 ## Known stub / unimplemented areas
 
