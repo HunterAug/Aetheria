@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { Components } from "react-markdown";
-import { delegate, type FeedItem, type OpenedPost } from "../lib/delegate";
+import type { FeedItem, OpenedPost } from "../lib/delegate";
+import { openFeedItem } from "../lib/feedItem";
 import { FeedItemsList } from "./FeedItemsList";
 import OpenedPostView from "./OpenedPostView";
 
@@ -142,30 +143,7 @@ export default function ReaderFeed({
     setOpening(item.post_id);
     setError(null);
     try {
-      if (item.is_own) {
-        const detail = await delegate.getPost(item.post_id);
-        setSelected({
-          post_id: detail.post_id,
-          title: detail.title,
-          markdown: detail.markdown,
-          author_pubkey: item.author_pubkey,
-          author_display_name: item.author_display_name,
-          is_own: true,
-        });
-      } else {
-        if (!item.post_contract_id) {
-          throw new Error("this post hasn't synced to the network yet - try again later");
-        }
-        const detail = await delegate.getRemotePost(item.post_contract_id);
-        setSelected({
-          post_id: item.post_id,
-          title: item.title,
-          markdown: detail.markdown,
-          author_pubkey: item.author_pubkey,
-          author_display_name: item.author_display_name,
-          is_own: false,
-        });
-      }
+      setSelected(await openFeedItem(item));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {

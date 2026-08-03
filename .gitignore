@@ -59,3 +59,6 @@ Thumbs.db
 # Logs
 *.log
 npm-debug.log*
+
+# scripts/dev-up.sh's pidfile for the delegate it starts (see scripts/).
+.dev-delegate.pid

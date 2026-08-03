@@ -5,6 +5,7 @@ import {
   type OpenedPost,
   type PublisherProfileData,
 } from "../lib/delegate";
+import { openFeedItem } from "../lib/feedItem";
 import { FeedItemsList } from "./FeedItemsList";
 import OpenedPostView from "./OpenedPostView";
 import { initial } from "../lib/format";
@@ -55,22 +56,11 @@ export default function PublisherProfileView({
   }
 
   async function open(item: FeedItem) {
-    if (item.locked || !data) return;
+    if (item.locked) return;
     setOpening(item.post_id);
     setError(null);
     try {
-      if (!item.post_contract_id) {
-        throw new Error("this post hasn't synced to the network yet - try again later");
-      }
-      const detail = await delegate.getRemotePost(item.post_contract_id);
-      setSelected({
-        post_id: item.post_id,
-        title: item.title,
-        markdown: detail.markdown,
-        author_pubkey: authorPubkey,
-        author_display_name: data.display_name,
-        is_own: false,
-      });
+      setSelected(await openFeedItem(item));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {

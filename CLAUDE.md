@@ -24,6 +24,51 @@ crypto flows, and the 16-week roadmap).
 - `app/` — React 18 + TypeScript + Tailwind + Tauri, Layer 1. Talks to the
   delegate only via the loopback WebSocket in `app/src/lib/delegate.ts`.
 
+## Dev scripts (as of 2026-08-03)
+
+`scripts/` collapses the multi-step build/start/stop sequences this file's
+own history shows getting run by hand, repeatedly, into single commands -
+written after those manual sequences had already caused a real mistake once
+(a stale installer, see the Freenet-sidecar section below) and were eating a
+lot of back-and-forth. All three are plain bash, run from anywhere via
+`bash scripts/<name>.sh` (git-bash, already on this machine).
+
+- **`scripts/build.sh`** - `cargo build --release` (delegate) → copy into
+  the Tauri sidecar dir → `npm run build:desktop` (frontend + Tauri shell +
+  both installers) → **byte-compares** the fresh delegate build against both
+  the sidecar copy and `builds/aetheria-delegate.exe`, and fails loudly if
+  they differ. That comparison is deliberately just a file diff, not an IPC
+  feature check (e.g. "does it recognize op X") - a feature check needs
+  updating every time a new op is added, a byte comparison catches "shipped
+  a stale binary" unconditionally forever. Exports `PATH` for `cargo` itself
+  (not always present in a fresh shell on this machine, see below) so it
+  doesn't depend on the caller remembering to.
+- **`scripts/dev-up.sh`** - confirms the real Freenet dev service is
+  reachable (starts it if not - `freenet.exe service start`), then starts
+  the delegate release binary against the real local identity
+  (`AETHERIA_DEV_PASSPHRASE=aetheria-dev-local-only`, this machine's
+  documented dev convention). Idempotent - a second call detects the
+  already-running delegate via its pidfile and no-ops. Writes
+  `.dev-delegate.pid` (gitignored) and `delegate.log` (gitignored, also
+  where startup errors go rather than the terminal). Deliberately does
+  **not** start the Vite dev server - use the Browser tool's `preview_start`
+  (`"aetheria-frontend"`, see `.claude/launch.json`) for that; it already
+  runs `npm run dev` with proper log/tab integration, this would just be a
+  worse duplicate.
+- **`scripts/dev-down.sh`** - stops the delegate `dev-up.sh` started (via
+  its pidfile, falling back to killing by process name if the pidfile's
+  missing - e.g. a delegate started outside this script). Leaves the
+  persistent Freenet dev service running by default, since it's a standing
+  part of the environment that predates any given session, not something to
+  tear down casually - pass `--with-freenet` to also stop it.
+- **Real gotcha found writing these, worth knowing generally**: git-bash's
+  `$!` after backgrounding a Windows `.exe` with `&` is an MSYS-internal
+  pseudo-PID, **not** the real Windows PID `Get-Process`/`Stop-Process`
+  need (confirmed via `ps -W`'s WINPID column showing a different number
+  entirely). `dev-up.sh` looks the real PID up by process name afterward
+  instead of trusting `$!` - trusting it silently produces a pidfile that
+  can't actually stop anything.
+
 ## Environment notes (this machine)
 
 - Rust toolchain (`rustup`/`cargo`) and the `wasm32-unknown-unknown` target
@@ -923,6 +968,25 @@ Following tab showing management-only (no duplicate feed), Subscriptions
 showing a real wallet-connect flow and an honest per-publisher error, and
 Subscribers showing publisher-side-only content with no wallet/Subscribe UI
 left on it.
+
+## Real search bar (as of 2026-08-03)
+
+`RightRail.tsx`'s "Search Aetheria" box used to be static markup with no
+`<input>` at all. Real now, client-side only - no new IPC op, no server-side
+index. Searches over the same two sources everything else in the app
+already treats as "what's reachable": the Latest feed (`get_latest_feed` -
+every publisher's recent posts network-wide, up to its 1000-entry cap) for
+post title/summary/author matches, plus `list_followed_publishers` for
+publisher-name matches from people you follow but haven't necessarily
+posted anything findable yet. Debounced 300ms. Selecting a post result
+resolves it via a new shared `app/src/lib/feedItem.ts::openFeedItem` helper
+(factored out of what were three separate copies of the same is_own
+branch in `ReaderFeed.tsx`/`PublisherProfileView.tsx`/here) and opens it at
+the `App.tsx` level via a new `searchOpenedPost` state, independent of
+whatever tab you're on; selecting a publisher result reuses the existing
+`viewingAuthor` navigation Following/feeds already use. A locked
+(subscriber-only, someone else's) result still shows up with a lock badge,
+same convention as every other feed - just not openable.
 
 ## Known stub / unimplemented areas
 
