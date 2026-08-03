@@ -95,6 +95,15 @@ crypto flows, and the 16-week roadmap).
   to wherever the binary happens to be launched from (see the git history
   around 2026-08-02 for why that distinction mattered — a CWD-relative path
   silently forked the cache across multiple stray folders).
+- **`%APPDATA%\aetheria\aetheria-delegate\data.stale-wrong-passphrase\`
+  exists on this machine** (found 2026-08-02 while verifying the Freenet
+  sidecar work) - an old `identity.key` that does **not** decrypt under the
+  documented `AETHERIA_DEV_PASSPHRASE`, alongside a much smaller/staler
+  SQLite cache than the real `data\` directory. Deliberately preserved
+  rather than deleted (unclear provenance - possibly an earlier passphrase
+  actually used before the `aetheria-dev-local-only` convention was
+  settled on), not integrated into anything. Safe to delete if it's not
+  needed, just hasn't been confirmed disposable.
 
 ## Conventions
 
@@ -440,6 +449,36 @@ sequence the first time this machine's Freenet install went through it).
   first-run display-name prompt for the fresh identity. Closing the window
   gracefully killed both sidecars and freed both ports. Uninstalled cleanly
   afterward (`uninstall.exe /S`) and restarted the real Freenet service.
+
+**Known distribution friction points** (real, not yet addressed - the
+installer works, but a first-time recipient will likely hit one or more of
+these):
+
+- **Unsigned installer** - no code-signing cert is configured
+  (`bundle.windows` has no signing config in `tauri.conf.json`), so Windows
+  SmartScreen will very likely show "Windows protected your PC" on first
+  run of the `.exe`/`.msi`. Needs a real code-signing certificate to fix.
+- **x64 Windows only** - this build targets `x86_64-pc-windows-msvc`
+  specifically; won't run on macOS, Linux, or ARM Windows.
+- **Possible firewall prompt** for the bundled `freenet.exe`'s P2P network
+  ports (separate from the loopback-only 7509/47021 API ports, which
+  shouldn't need firewall approval).
+- **WebView2 dependency** - no `bundle.windows.webviewInstallMode` is set in
+  `tauri.conf.json`, so it uses Tauri's default (`downloadBootstrapper`):
+  fetches WebView2 at install time if not already present. Nearly always a
+  no-op on real Windows 10/11 machines (Microsoft ships it via Windows
+  Update), but a locked-down/offline machine would need internet access
+  during install specifically for this.
+- **First-run identity publish can hit the documented gateway-network
+  flakiness above** (observed directly during this work's own testing) -
+  the UI surfaces a clean, retryable error rather than crashing, and simply
+  retrying with the same passphrase succeeds (the identity file is already
+  created locally by the first attempt, so a retry unlocks it rather than
+  re-creating it - see `handle_unlock`'s `is_new` check, computed fresh from
+  disk on every call).
+- **No passphrase recovery** - `keys.rs`'s encryption is by design
+  one-way; a forgotten passphrase means a lost identity, worth calling out
+  explicitly to a non-technical recipient.
 
 ### Part 2: real in-app passphrase unlock, locked/unlocked startup split
 
