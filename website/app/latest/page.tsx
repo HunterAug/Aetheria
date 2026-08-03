@@ -3,7 +3,7 @@ import path from "node:path";
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "Latest posts — Aetheria",
+  title: "Latest posts | Aetheria",
   description: "Recent posts published on the real Aetheria/Freenet network, read-only.",
 };
 
@@ -74,13 +74,13 @@ export default function Latest() {
       <h1 className="text-3xl font-bold text-neutral-50">Latest posts</h1>
       <p className="mt-3 text-neutral-400 leading-relaxed">
         Real posts from the real Aetheria network, browsable here without
-        installing anything. This page is read-only — you can look, but
+        installing anything. This page is read-only. You can look, but
         publishing, following, and subscribing all require the app itself.
       </p>
       {snapshot && (
         <p className="mt-2 text-xs text-neutral-600">
           Snapshot updated{" "}
-          {new Date(snapshot.generated_at * 1000).toLocaleString()} — refreshed
+          {new Date(snapshot.generated_at * 1000).toLocaleString()}, refreshed
           periodically, not real-time.
         </p>
       )}
@@ -88,12 +88,12 @@ export default function Latest() {
       <div className="mt-10">
         {!snapshot && (
           <p className="text-sm text-neutral-500">
-            No snapshot available yet — check back soon.
+            No snapshot available yet. Check back soon.
           </p>
         )}
         {snapshot && snapshot.entries.length === 0 && (
           <p className="text-sm text-neutral-500">
-            Nothing published yet. Be the first —{" "}
+            Nothing published yet. Be the first to{" "}
             <a href="/download" className="text-aeblue-400 hover:underline">
               download Aetheria
             </a>
@@ -130,7 +130,7 @@ export default function Latest() {
                 <p className="text-sm text-neutral-400 mt-0.5">{item.summary}</p>
                 {item.locked && (
                   <p className="text-xs text-neutral-600 mt-1">
-                    Full content is encrypted for subscribers — this preview
+                    Full content is encrypted for subscribers. This preview
                     is all anyone else ever sees.
                   </p>
                 )}

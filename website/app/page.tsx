@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { IS_RELEASED } from "@/lib/config";
+import { isReleased } from "@/lib/config";
 
 const FEATURES = [
   {
@@ -12,7 +12,7 @@ const FEATURES = [
   },
   {
     title: "Direct, non-custodial payments",
-    body: "Subscriptions are paid wallet-to-wallet over the Lightning Network (via Nostr Wallet Connect) — money goes straight from a reader to a publisher. No platform ever touches it.",
+    body: "Subscriptions are paid wallet-to-wallet over the Lightning Network (via Nostr Wallet Connect). Money goes straight from a reader to a publisher, and no platform ever touches it.",
   },
   {
     title: "Free and open source",
@@ -20,7 +20,8 @@ const FEATURES = [
   },
 ];
 
-export default function Home() {
+export default async function Home() {
+  const released = await isReleased();
   return (
     <div>
       <section className="max-w-5xl mx-auto px-6 pt-20 pb-16 text-center">
@@ -32,11 +33,11 @@ export default function Home() {
         <p className="mt-6 text-lg text-neutral-400 max-w-2xl mx-auto leading-relaxed">
           Aetheria is a decentralized, serverless replacement for Substack or
           Medium. Your posts live on the Freenet peer-to-peer network instead
-          of one company's servers — nobody can deplatform you, and nobody
+          of one company's servers. Nobody can deplatform you, and nobody
           stands between you and your readers.
         </p>
         <div className="mt-8 flex items-center justify-center gap-4">
-          {IS_RELEASED ? (
+          {released ? (
             <Link
               href="/download"
               className="rounded-lg aetheria-gradient text-white text-sm font-semibold px-6 py-3 shadow-lg shadow-aeblue-600/20 hover:brightness-110 transition"

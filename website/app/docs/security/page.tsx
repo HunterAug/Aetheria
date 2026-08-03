@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "Security & your passphrase — Aetheria",
+  title: "Security & your passphrase | Aetheria",
   description: "How Aetheria protects your identity, and why there's no password reset.",
 };
 
@@ -20,16 +20,16 @@ export default function Security() {
         keypair and encrypts it on disk using a key derived from your
         passphrase. That keypair is what signs every post you publish (so
         readers can verify it&apos;s genuinely from you) and what a
-        subscriber&apos;s payment gets tied to. Nobody — not even someone
-        with access to your computer&apos;s files — can use that identity
-        without your passphrase.
+        subscriber&apos;s payment gets tied to. Not even someone with access
+        to your computer&apos;s files can use that identity without your
+        passphrase.
       </p>
 
       <h2 className="text-xl font-semibold text-neutral-100 mt-10 mb-3">
         Why there&apos;s no &quot;forgot password&quot;
       </h2>
       <p className="text-neutral-400 leading-relaxed">
-        A password reset requires someone — a company, a server — to hold a
+        A password reset requires someone (a company, a server) to hold a
         way to recover or override your credentials. Aetheria doesn&apos;t
         have that, on purpose: nobody except you holds anything that could
         unlock your identity, which is exactly what makes it yours. The
@@ -41,7 +41,7 @@ export default function Security() {
       </p>
       <p className="text-neutral-400 leading-relaxed mt-3">
         Treat it like you would a crypto wallet seed phrase or a safe
-        combination — write it down, store it somewhere durable, and
+        combination. Write it down, store it somewhere durable, and
         don&apos;t rely on memory alone.
       </p>
 
@@ -52,7 +52,7 @@ export default function Security() {
         Your encrypted identity file and a local cache of your own posts
         live only on your computer. The Aetheria app talks to a local
         background process (the &quot;delegate&quot;) over a connection that
-        never leaves your machine — your keys and any decrypted subscriber
+        never leaves your machine. Your keys and any decrypted subscriber
         content never get sent anywhere except the signed, already-public
         data your posts are made of.
       </p>
@@ -63,7 +63,7 @@ export default function Security() {
       <p className="text-neutral-400 leading-relaxed">
         Once you publish, your public key, your public posts, and the
         title/summary of your subscriber-only posts are visible to anyone on
-        the network — that&apos;s how following, discovery, and the Latest
+        the network. That&apos;s how following, discovery, and the Latest
         feed work. Only the full content of subscriber-only posts is
         encrypted.
       </p>

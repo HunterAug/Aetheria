@@ -55,7 +55,7 @@ on-demand per visitor. Instead:
 
 ## Release gate
 
-`IsReleased` env var (`lib/config.ts`'s `IS_RELEASED`, `=== "true"` check -
+`IsReleased` env var (`lib/config.ts`'s `isReleased()`, `=== "true"` check -
 any other value, including unset, is treated as `false` and fails closed)
 gates every download button on the site (`app/page.tsx`'s hero CTA,
 `app/download/page.tsx`'s two file buttons). While `false`, those render a
@@ -64,6 +64,31 @@ gates every download button on the site (`app/page.tsx`'s hero CTA,
 URL, this is a UI-level gate, not real access control. Flip it in Vercel's
 project settings (Environment Variables) when actually ready to launch; see
 `.env.example` for local testing (copy to `.env.local`, gitignored).
+
+### Private preview bypass
+
+`isReleased()` also returns `true` if the visitor holds a cookie named
+`aetheria_preview` (see `PREVIEW_COOKIE_NAME` in `lib/config.ts`) - this
+lets Hunter share the real download links with specific people before
+flipping `IsReleased` on for everyone.
+
+- Visiting `https://aetherianode.com/<PREVIEW_ACCESS_KEY>` sets that cookie
+  (`app/[key]/route.ts` - a dynamic single-segment route that only matches
+  when no static route already claims the path, so it never shadows
+  `/download`, `/docs`, etc.) and redirects to `/`. Wrong or missing key just
+  redirects home with no cookie set - no error page distinguishing valid
+  from invalid keys.
+- The key itself lives in the `PREVIEW_ACCESS_KEY` env var (Vercel project
+  settings, or `.env.local` for local testing - see `.env.example`), never
+  committed. Compared with `crypto.timingSafeEqual` to avoid a timing
+  side-channel.
+- Because `isReleased()` now reads a per-request cookie via `next/headers`,
+  `/` and `/download` are dynamically rendered (can't be statically
+  pre-rendered at build time) - expected and fine for a low-traffic
+  marketing site.
+- To rotate the key: generate a new random value, update
+  `PREVIEW_ACCESS_KEY` in Vercel, send out the new link. The old key stops
+  working immediately since there's nothing stateful to invalidate.
 
 ## Deploying
 

@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Aetheria — Censorship-resistant publishing on Freenet",
+  title: "Aetheria | Censorship-resistant publishing on Freenet",
   description:
     "Aetheria is a decentralized, serverless publishing platform. No company can take down your posts, suspend your account, or read your subscribers' payment details.",
 };
@@ -56,7 +56,7 @@ export default function RootLayout({
                 </Link>
               ))}
               <a
-                href="https://github.com/dakcalander-tech/Aetheria"
+                href="https://github.com/HunterAug/Aetheria"
                 className="text-neutral-400 hover:text-neutral-100 transition-colors"
               >
                 GitHub
@@ -81,7 +81,7 @@ export default function RootLayout({
                 Download
               </Link>
               <a
-                href="https://github.com/dakcalander-tech/Aetheria"
+                href="https://github.com/HunterAug/Aetheria"
                 className="hover:text-neutral-300"
               >
                 Source

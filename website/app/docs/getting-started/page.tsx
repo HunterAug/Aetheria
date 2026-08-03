@@ -2,7 +2,7 @@ import Link from "next/link";
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "Getting started — Aetheria",
+  title: "Getting started | Aetheria",
   description: "Install Aetheria and publish your first post.",
 };
 
@@ -20,7 +20,7 @@ export default function GettingStarted() {
           download page
         </Link>{" "}
         and run it. Windows will likely warn you it doesn&apos;t recognize the
-        publisher — that&apos;s expected for a small open-source app, not a
+        publisher. That&apos;s expected for a small open-source app, not a
         sign anything is wrong. Click through it.
       </p>
 
@@ -30,7 +30,7 @@ export default function GettingStarted() {
       <p className="text-neutral-400 leading-relaxed">
         The first time you open Aetheria, it asks you to choose a
         passphrase. This encrypts a cryptographic keypair stored only on
-        your computer — it&apos;s how you sign everything you publish, and
+        your computer. It&apos;s how you sign everything you publish, and
         how readers can trust a post really came from you.
       </p>
       <p className="text-neutral-400 leading-relaxed mt-3">
@@ -55,11 +55,11 @@ export default function GettingStarted() {
       </p>
       <ul className="mt-3 space-y-2 text-neutral-400 list-disc list-inside">
         <li>
-          <strong className="text-neutral-300">Public</strong> — anyone can
+          <strong className="text-neutral-300">Public</strong>: anyone can
           read it, no subscription needed.
         </li>
         <li>
-          <strong className="text-neutral-300">Subscriber-only</strong> —
+          <strong className="text-neutral-300">Subscriber-only</strong>:
           encrypted; only people who&apos;ve paid to subscribe to you can
           decrypt it. Everyone else still sees the title and summary, as a
           teaser.
@@ -78,15 +78,15 @@ export default function GettingStarted() {
         publishers you follow.{" "}
         <strong className="text-neutral-300">Latest</strong> shows recent
         posts from everyone on the network, whether you follow them or
-        not — it&apos;s how you find new publishers to begin with.
+        not. It&apos;s how you find new publishers to begin with.
       </p>
 
       <h2 className="text-xl font-semibold text-neutral-100 mt-10 mb-3">
         5. Follow someone
       </h2>
       <p className="text-neutral-400 leading-relaxed">
-        Click any author&apos;s name — in Home, Latest, or on a post you
-        opened — to see their profile and a Follow button. You can also
+        Click any author&apos;s name (in Home, Latest, or on a post you
+        opened) to see their profile and a Follow button. You can also
         paste a publisher&apos;s public key directly on the Following tab if
         you know it but haven&apos;t seen a post of theirs yet.
       </p>
@@ -96,14 +96,14 @@ export default function GettingStarted() {
       </h2>
       <p className="text-neutral-400 leading-relaxed">
         Aetheria supports paid subscriptions over the Lightning Network via
-        Nostr Wallet Connect — connect a Lightning wallet on the
+        Nostr Wallet Connect. Connect a Lightning wallet on the
         Subscriptions tab and payment goes directly from your wallet to the
         publisher&apos;s, with no platform in between.
       </p>
       <p className="text-neutral-400 leading-relaxed mt-3">
         <strong className="text-neutral-300">Current limitation:</strong>{" "}
         subscribing only works for testing against your own publication
-        right now. Subscribing to someone else isn&apos;t supported yet — it
+        right now. Subscribing to someone else isn&apos;t supported yet. It
         needs a secure way for your app to learn that publisher&apos;s
         encryption key, which hasn&apos;t been built. You&apos;ll get a clear
         error if you try, not a silent failure or a charge with nothing to
