@@ -12,11 +12,14 @@ pub mod freenet_bridge;
 pub mod ipc;
 pub mod keys;
 pub mod nwc;
+pub mod watcher;
 
 #[cfg(test)]
 mod follow_publisher_e2e_test;
 #[cfg(test)]
 mod network_status_e2e_test;
+#[cfg(test)]
+mod new_post_notification_e2e_test;
 #[cfg(test)]
 mod subscriber_registry_e2e_test;
 

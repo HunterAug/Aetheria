@@ -14,6 +14,17 @@ use aetheria_delegate::{db, ipc, IPC_PORT};
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
 
+/// Dev/test escape hatch, same spirit as `AETHERIA_DATA_DIR_OVERRIDE` below
+/// and `AETHERIA_FREENET_WS_URL` in `freenet_bridge.rs`: run this delegate's
+/// IPC listener somewhere other than the standard 47021.
+///
+/// Exists because verifying anything about *two* Aetheria users on one
+/// machine (which is what "your followers get notified when you publish"
+/// inherently needs) means running two delegates at once, and the second one
+/// can't have the first one's port. Unset for any normal run - the UI in
+/// `app/src/lib/delegate.ts` only ever dials 47021.
+const IPC_PORT_ENV: &str = "AETHERIA_IPC_PORT";
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
@@ -34,7 +45,21 @@ async fn main() -> Result<()> {
     // paths this used to use synchronously (see `ipc.rs::try_legacy_auto_unlock`,
     // spawned alongside the listener below), or a real `unlock` IPC request
     // from the UI. See `ipc.rs`'s module docs for the full picture.
-    ipc::serve(IPC_PORT, db, data_dir.join("identity.key")).await
+    ipc::serve(ipc_port(), db, data_dir.join("identity.key")).await
+}
+
+fn ipc_port() -> u16 {
+    match std::env::var(IPC_PORT_ENV).ok().and_then(|p| p.parse().ok()) {
+        Some(port) => {
+            tracing::warn!(
+                port,
+                "{IPC_PORT_ENV} is set - listening there instead of the standard IPC port. \
+                 Dev/test only."
+            );
+            port
+        }
+        None => IPC_PORT,
+    }
 }
 
 /// Platform-appropriate app data directory (e.g. `%APPDATA%\aetheria\aetheria-delegate\data`

@@ -3,10 +3,18 @@
 // (see delegate/), which the UI talks to over a loopback WebSocket
 // (ws://127.0.0.1:47021, see app/src/lib/delegate.ts).
 //
-// This process is responsible for one extra thing beyond rendering: starting
-// and stopping that daemon automatically, bundled as a Tauri "sidecar" (see
-// tauri.conf.json's bundle.externalBin and https://v2.tauri.app/develop/sidecar/)
-// so the user never has to open a terminal and run it by hand.
+// This process is responsible for three things beyond rendering:
+//
+// 1. Starting and stopping that daemon automatically, bundled as a Tauri
+//    "sidecar" (see tauri.conf.json's bundle.externalBin and
+//    https://v2.tauri.app/develop/sidecar/) so the user never has to open a
+//    terminal and run it by hand.
+// 2. Living in the system tray: closing the window hides it rather than
+//    quitting, so the delegate keeps watching the publishers you follow (see
+//    delegate/src/watcher.rs) while the app is out of sight. Quit in the tray
+//    menu is what actually exits.
+// 3. Turning the delegate's "someone you follow just published" pushes into
+//    real OS notifications, via the `show_notification` command below.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::io::Write;
@@ -14,7 +22,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
 
-use tauri::{AppHandle, Manager, RunEvent};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
+use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_shell::{process::CommandChild, process::CommandEvent, ShellExt};
 
 /// Holds the delegate sidecar's child handle so it can be killed on exit.
@@ -34,6 +45,56 @@ struct FreenetChild(Mutex<Option<CommandChild>>);
 /// apart from "the node exited on its own" and skip respawning in the
 /// former case.
 struct ShuttingDown(AtomicBool);
+
+/// Distinguishes "the user closed the window" (hide to tray - the delegate
+/// stays alive and keeps watching followed publishers, which is the whole
+/// point of the notifications work) from "the user chose Quit in the tray
+/// menu" (really exit, killing both sidecars). Without this flag the window's
+/// `CloseRequested` handler would also swallow the close that a real quit
+/// performs, and the app could never be closed at all.
+struct QuitRequested(AtomicBool);
+
+/// Brings the main window back from the tray. Used by both the tray menu's
+/// "Open Aetheria" item and a plain left-click on the tray icon, matching
+/// how Slack/Discord behave on Windows.
+fn show_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+/// Shows a real OS notification (a Windows toast). Called from the frontend
+/// (`app/src/lib/notifications.ts`) when the delegate pushes a `new_post`
+/// event over its IPC WebSocket - the delegate itself is a separate process
+/// with no window and no access to Tauri's APIs, so the round trip through
+/// the webview is what connects "the network told us something" to "the OS
+/// tells the user".
+///
+/// Errors are returned rather than swallowed so the caller can log them, but
+/// the caller treats a failure as cosmetic: a toast that didn't appear must
+/// never break the app.
+#[tauri::command]
+fn show_notification(app: AppHandle, title: String, body: String) -> Result<(), String> {
+    let outcome = app
+        .notification()
+        .builder()
+        .title(&title)
+        .body(&body)
+        .show();
+    // Logged like the sidecars' output above, and for the same reason: a
+    // toast is the one part of this app whose success or failure leaves no
+    // trace anywhere else (the OS may legitimately suppress it - focus
+    // assist, notifications turned off, an unpackaged dev build Windows
+    // won't toast for), so without this line "did it even get here?" is
+    // unanswerable from outside.
+    match &outcome {
+        Ok(()) => println!("[notify] shown: {title} - {body}"),
+        Err(e) => eprintln!("[notify] failed: {e} (title: {title})"),
+    }
+    outcome.map_err(|e| e.to_string())
+}
 
 /// Forwards a sidecar's stdout/stderr into this process's own console
 /// (visible in `npm run tauri dev`'s terminal), prefixed so interleaved
@@ -201,11 +262,70 @@ fn supervise_freenet(app: AppHandle, args: Vec<String>) {
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_notification::init())
+        .invoke_handler(tauri::generate_handler![show_notification])
         .manage(DelegateChild(Mutex::new(None)))
         .manage(FreenetChild(Mutex::new(None)))
         .manage(ShuttingDown(AtomicBool::new(false)))
+        .manage(QuitRequested(AtomicBool::new(false)))
         .setup(|app| {
             let shell = app.shell();
+
+            // Tray icon + close-to-tray. Notifications are only worth
+            // anything if the app can still be listening when its window
+            // isn't in front of you - before this, closing the window killed
+            // both sidecars (see the exit handler below), so the delegate
+            // stopped watching the moment you were done reading. Now closing
+            // hides, and Quit in the tray menu is the one thing that really
+            // exits (which still runs the exact same sidecar cleanup).
+            let open_item = MenuItem::with_id(app, "open", "Open Aetheria", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "quit", "Quit Aetheria", true, None::<&str>)?;
+            let tray_menu = Menu::with_items(app, &[&open_item, &quit_item])?;
+            let mut tray = TrayIconBuilder::new()
+                .tooltip("Aetheria")
+                .menu(&tray_menu)
+                // Left click opens the window; the menu stays on right click,
+                // which is the standard Windows behaviour.
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "open" => show_main_window(app),
+                    "quit" => {
+                        app.state::<QuitRequested>().0.store(true, Ordering::SeqCst);
+                        app.exit(0);
+                    }
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        show_main_window(tray.app_handle());
+                    }
+                });
+            // The window icon is already bundled at every size Tauri needs;
+            // reusing it means the tray never shows a blank placeholder, and
+            // there's no second icon asset to keep in sync.
+            if let Some(icon) = app.default_window_icon().cloned() {
+                tray = tray.icon(icon);
+            }
+            tray.build(app)?;
+
+            if let Some(window) = app.get_webview_window("main") {
+                let handle = app.handle().clone();
+                let hide_target = window.clone();
+                window.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        if handle.state::<QuitRequested>().0.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        api.prevent_close();
+                        let _ = hide_target.hide();
+                    }
+                });
+            }
 
             // Spawned first: the delegate's `FreenetBridge::connect_local()`
             // needs a real Freenet node listening on 127.0.0.1:7509 before it
@@ -279,6 +399,10 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error while building Aetheria")
         .run(|app_handle, event| {
+            // Reached only on a real quit now (the tray menu's Quit item, or
+            // the OS asking the app to exit) - closing the window hides it to
+            // the tray instead, see the `CloseRequested` handler in setup.
+            //
             // Make sure neither sidecar outlives the window - otherwise the
             // delegate would keep holding port 47021 and the SQLite lock,
             // and the bundled Freenet node would keep holding 7509, after

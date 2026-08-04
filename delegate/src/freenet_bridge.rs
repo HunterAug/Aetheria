@@ -1,7 +1,7 @@
 //! Bridge to a local Freenet node over its native host protocol (a
 //! WebSocket API exposed by `freenet-core` at a local port).
 //!
-//! Responsible for PUT/GET/UPDATE against the Aetheria contracts
+//! Responsible for PUT/GET/UPDATE/SUBSCRIBE against the Aetheria contracts
 //! (`PublisherProfileContract`, `ContentIndexContract`, `PostDataContract`;
 //! `SubscriberRegistryContract` is untouched - no real NWC subscriber flow
 //! yet, see `nwc.rs`).
@@ -57,6 +57,34 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 pub const NODE_WS_URL: &str = "ws://127.0.0.1:7509/v1/contract/command?encodingProtocol=native";
+
+/// Dev/test escape hatch, same spirit (and same "unset for any normal run"
+/// rule) as `AETHERIA_DATA_DIR_OVERRIDE` and `AETHERIA_FREENET_DATA_DIR_OVERRIDE`
+/// in `main.rs` / the Tauri shell: point the delegate at a Freenet node on a
+/// port other than the default 7509.
+///
+/// Added while verifying the new-post watcher, for a concrete reason worth
+/// recording: the only way to test push notifications is to have a node whose
+/// lifecycle the test controls, and on a machine that already runs one on
+/// 7509 (the normal state of this dev box) a second node has to live
+/// somewhere else. Set it to a full URL including the path and query string -
+/// `ws://127.0.0.1:7609/v1/contract/command?encodingProtocol=native` - both of
+/// which matter, see this module's docs above for what happens without them.
+const NODE_WS_URL_ENV: &str = "AETHERIA_FREENET_WS_URL";
+
+fn node_ws_url() -> String {
+    match std::env::var(NODE_WS_URL_ENV) {
+        Ok(url) if !url.trim().is_empty() => {
+            tracing::warn!(
+                url,
+                "{NODE_WS_URL_ENV} is set - connecting there instead of the default local node. \
+                 Dev/test only."
+            );
+            url
+        }
+        _ => NODE_WS_URL.to_string(),
+    }
+}
 
 /// A single-attempt PUT against the real gateway-routed public network has
 /// been observed (2026-08-02, this same node) to fail transiently - "put
@@ -155,8 +183,9 @@ impl FreenetBridge {
     /// before giving up - see that constant's doc comment for why this needs
     /// its own retry budget separate from `MAX_ATTEMPTS` above.
     pub async fn connect_local() -> Result<Self> {
+        let url = node_ws_url();
         for attempt in 1..=CONNECT_MAX_ATTEMPTS {
-            match tokio_tungstenite::connect_async(NODE_WS_URL).await {
+            match tokio_tungstenite::connect_async(&url).await {
                 Ok((stream, _)) => {
                     if attempt > 1 {
                         tracing::info!(attempt, "connected to Freenet node after retrying");
@@ -170,14 +199,14 @@ impl FreenetBridge {
                     tracing::warn!(
                         attempt,
                         error = %e,
-                        "Freenet node not reachable yet at {NODE_WS_URL}, retrying"
+                        "Freenet node not reachable yet at {url}, retrying"
                     );
                     tokio::time::sleep(CONNECT_RETRY_DELAY).await;
                 }
                 Err(e) => {
                     return Err(e).with_context(|| {
                         format!(
-                            "connecting to Freenet node at {NODE_WS_URL} (gave up after {CONNECT_MAX_ATTEMPTS} attempts)"
+                            "connecting to Freenet node at {url} (gave up after {CONNECT_MAX_ATTEMPTS} attempts)"
                         )
                     })
                 }
@@ -481,14 +510,134 @@ impl FreenetBridge {
         unreachable!("loop above always returns on its last iteration")
     }
 
-    // TODO(Phase 4): real push-based subscription handling for the pinning
-    // daemon / live feed updates (design doc §7-8). `ContractRequest::Subscribe`
-    // is trivial to send, but nothing in this milestone consumes the
-    // `UpdateNotification` responses it would trigger (the delegate only ever
-    // does request/response PUT-GET-UPDATE cycles today), so wiring it up now
-    // would be a silent no-op rather than a real feature.
-    #[allow(dead_code)]
-    pub async fn subscribe(&self, _key: ContractInstanceId) -> Result<()> {
-        todo!("Freenet subscribe not yet consumed anywhere (Phase 4)")
+    /// Asks the node to push every future change to `key` back down this
+    /// connection as a `ContractResponse::UpdateNotification` (consumed by
+    /// `next_update_notification` below; see `watcher.rs` for the only caller
+    /// today). Returns the node's own `subscribed` flag rather than swallowing
+    /// it - `false` means the node accepted the request but isn't actually
+    /// watching that contract, which is a real, reportable outcome and not the
+    /// same as an error.
+    ///
+    /// **Only meaningful on a connection whose `UpdateNotification`s somebody
+    /// is actually reading.** Every other method here is a strict
+    /// request/response round trip that logs-and-skips anything else arriving
+    /// mid-flight ("ignoring unrelated host response"), so a subscription
+    /// established on the delegate's *main* bridge would have its pushes
+    /// silently discarded by whichever GET/PUT/UPDATE happened to be in
+    /// progress. That's why `watcher.rs` opens a second, dedicated
+    /// `FreenetBridge` for subscriptions instead of reusing the main one.
+    ///
+    /// There is deliberately no `unsubscribe` counterpart: `ContractRequest`
+    /// (freenet-stdlib 0.8.5) has no such variant - Put/Update/Get/Subscribe
+    /// is the whole surface. Dropping the connection is the only way to stop
+    /// receiving pushes, which is exactly what `watcher.rs` does when a
+    /// publisher is unfollowed.
+    pub async fn subscribe(&self, key: ContractInstanceId) -> Result<bool> {
+        let request = ClientRequest::ContractOp(ContractRequest::Subscribe {
+            key,
+            // No summary: this delegate wants whatever the node considers a
+            // change, not a delta computed against a state we claim to
+            // already hold. `ContentIndexContract::update_state` merges a
+            // full state and a delta identically (both decode to a
+            // `ContentIndexState`), so the extra bookkeeping a summary would
+            // need buys nothing here - see `watcher.rs`'s decoding.
+            summary: None,
+        });
+        let mut api = self.api.lock().await;
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            api.send(request.clone())
+                .await
+                .map_err(|e| anyhow::anyhow!("sending SUBSCRIBE request: {e}"))?;
+
+            let outcome = loop {
+                match api.recv().await {
+                    Ok(HostResponse::ContractResponse(ContractResponse::SubscribeResponse {
+                        subscribed,
+                        ..
+                    })) => break Ok(subscribed),
+                    // A `Subscribe` implicitly GETs the contract if the node
+                    // doesn't have it yet (see `ContractRequest::Subscribe`'s
+                    // own docs in freenet-stdlib), so a `NotFound` here is a
+                    // real answer to this request, not stray traffic: nobody
+                    // on the network is holding that contract right now.
+                    // Reported as `false` (not subscribed) rather than
+                    // retried three more times - a publisher whose index
+                    // hasn't propagated yet is an ordinary state on this
+                    // network, and the caller re-attempts on its own cadence.
+                    Ok(HostResponse::ContractResponse(ContractResponse::NotFound { .. })) => {
+                        break Ok(false)
+                    }
+                    Ok(other) => {
+                        tracing::debug!(
+                            ?other,
+                            "ignoring unrelated host response while awaiting SUBSCRIBE"
+                        );
+                        continue;
+                    }
+                    Err(e) => break Err(anyhow::anyhow!("SUBSCRIBE failed: {e}")),
+                }
+            };
+
+            match outcome {
+                Ok(subscribed) => return Ok(subscribed),
+                Err(e) if attempt < MAX_ATTEMPTS => {
+                    tracing::warn!(attempt, error = %e, "SUBSCRIBE failed, retrying");
+                    tokio::time::sleep(RETRY_DELAY).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        unreachable!("loop above always returns on its last iteration")
+    }
+
+    /// Blocks until the node pushes the next `UpdateNotification` for *any*
+    /// contract this connection has subscribed to, and returns which contract
+    /// it was for plus the update payload.
+    ///
+    /// Unlike every other method here this is not a request/response pair -
+    /// nothing is sent, and it can wait indefinitely - so it holds the
+    /// connection's mutex for as long as it's pending. That is only safe on a
+    /// bridge dedicated to watching (see `subscribe`'s docs): any other
+    /// caller's GET on the same bridge would block until an unrelated
+    /// publisher happened to publish something. `watcher.rs` owns such a
+    /// bridge exclusively.
+    ///
+    /// # Cancel safety
+    ///
+    /// Dropping this future is how `watcher.rs` reacts to a follow/unfollow
+    /// without waiting for a notification first, so it needs to be safe in
+    /// the ways that matter here, and it mostly is: a notification already
+    /// queued inside `WebApi` stays queued (its internal channel receive is
+    /// cancel-safe), and the mutex guard is released. The one documented gap
+    /// is `WebApi::recv`'s own: a *streamed* response (one large enough for
+    /// the node to chunk it, >64 KiB in freenet-stdlib 0.8.5) that is
+    /// mid-reassembly when the future is dropped is lost. A `ContentIndexState`
+    /// push is far smaller than that in any realistic case, and `watcher.rs`
+    /// polls each followed publisher's index on a timer regardless, so a lost
+    /// push costs at most one polling interval of latency rather than a
+    /// missed post.
+    pub async fn next_update_notification(&self) -> Result<(ContractKey, UpdateData<'static>)> {
+        let mut api = self.api.lock().await;
+        loop {
+            match api.recv().await {
+                Ok(HostResponse::ContractResponse(ContractResponse::UpdateNotification {
+                    key,
+                    update,
+                })) => return Ok((key, update)),
+                Ok(other) => {
+                    tracing::debug!(
+                        ?other,
+                        "ignoring non-notification host response on the subscription connection"
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "subscription connection failed while awaiting an update notification: {e}"
+                    ))
+                }
+            }
+        }
     }
 }

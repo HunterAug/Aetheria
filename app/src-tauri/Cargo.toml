@@ -8,11 +8,21 @@ edition = "2021"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# `tray-icon` unlocks `tauri::tray` - closing the window now hides Aetheria to
+# the system tray instead of quitting, so the delegate keeps watching for new
+# posts from publishers you follow while the window is out of the way (see
+# main.rs's tray setup and delegate/src/watcher.rs).
+tauri = { version = "2", features = ["tray-icon"] }
 # Lets main.rs launch the aetheria-delegate daemon as a Tauri "sidecar"
 # (bundled external binary, spawned/killed as a managed child process) -
 # see tauri.conf.json's bundle.externalBin and main.rs's setup hook.
 tauri-plugin-shell = "2"
+# Real OS toasts (Windows Action Center) for "someone you follow published".
+# Used from Rust rather than through its JS API: the frontend already holds
+# the delegate's WebSocket, so it just forwards the event to the tiny
+# `show_notification` command in main.rs, and no extra npm dependency or
+# capability grant is needed for a command this app defines itself.
+tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

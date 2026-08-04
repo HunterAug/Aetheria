@@ -195,15 +195,48 @@ export interface OpenedPost {
   is_own: boolean;
 }
 
+/// A post from a publisher you follow, pushed by the delegate the moment it
+/// learns about it - either from a real Freenet subscription push or from the
+/// watcher's polling backstop (see `delegate/src/watcher.rs`). Unlike
+/// everything else in this file this arrives *unprompted*: it carries an
+/// `event` field and no `id`, which is exactly how the socket handler below
+/// tells it apart from a reply to a request.
+export interface NewPostEvent {
+  event: "new_post";
+  post_id: string;
+  post_contract_id: string;
+  title: string;
+  summary: string;
+  access_level: AccessLevel;
+  /// Subscriber-only post from someone else: announced on purpose (that's
+  /// the point of a teaser) but not openable yet - same meaning as
+  /// `FeedItem.locked`.
+  locked: boolean;
+  author_pubkey: string;
+  author_display_name: string;
+  published_at: number;
+}
+
+export type DelegateEvent = NewPostEvent;
+export type DelegateEventName = DelegateEvent["event"];
+
 interface PendingEntry {
   resolve: (value: unknown) => void;
   reject: (reason: unknown) => void;
 }
 
+/// How long to wait before rebuilding a dropped socket. Only applies once
+/// something has registered an event listener (see `on`) - without one there
+/// is nothing to keep a connection open *for*, and the next request opens one
+/// anyway.
+const RECONNECT_DELAY_MS = 3000;
+
 class DelegateClient {
   private ws: WebSocket | null = null;
   private connecting: Promise<WebSocket> | null = null;
   private pending = new Map<string, PendingEntry>();
+  private listeners = new Map<string, Set<(event: DelegateEvent) => void>>();
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   private connect(): Promise<WebSocket> {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
@@ -221,21 +254,77 @@ class DelegateClient {
       socket.addEventListener("message", (event) => this.handleMessage(event));
       socket.addEventListener("error", () => {
         this.connecting = null;
+        this.scheduleReconnect();
         reject(new Error("could not reach the Aetheria delegate. Is it running?"));
       });
       socket.addEventListener("close", () => {
         this.ws = null;
+        this.scheduleReconnect();
       });
     });
     return this.connecting;
   }
 
+  /// Keeps the push channel alive across a delegate restart (or any dropped
+  /// socket) for as long as anything is listening for events. Requests don't
+  /// need this - each one connects on demand - but a notification nobody is
+  /// connected to receive is simply never delivered, so the listening case
+  /// has to reconnect on its own.
+  private scheduleReconnect() {
+    if (this.listeners.size === 0 || this.reconnectTimer !== null) return;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.connect().catch(() => this.scheduleReconnect());
+    }, RECONNECT_DELAY_MS);
+  }
+
+  /// Subscribes to server-push events. Returns an unsubscribe function, so a
+  /// React effect can just `return delegate.on(...)`.
+  on(event: DelegateEventName, handler: (event: DelegateEvent) => void): () => void {
+    let handlers = this.listeners.get(event);
+    if (!handlers) {
+      handlers = new Set();
+      this.listeners.set(event, handlers);
+    }
+    handlers.add(handler);
+    // Make sure a socket actually exists - otherwise nothing would be
+    // listening until the UI happened to make a request.
+    void this.connect().catch(() => {
+      /* reported through the reconnect loop, not here */
+    });
+
+    return () => {
+      const set = this.listeners.get(event);
+      if (!set) return;
+      set.delete(handler);
+      if (set.size === 0) this.listeners.delete(event);
+    };
+  }
+
   private handleMessage(event: MessageEvent<string>) {
     const msg = JSON.parse(event.data) as {
-      id: string;
+      id?: string;
+      event?: DelegateEventName;
       result?: unknown;
       error?: string;
     };
+
+    if (msg.event) {
+      const handlers = this.listeners.get(msg.event);
+      if (!handlers) return;
+      for (const handler of handlers) {
+        try {
+          handler(msg as unknown as DelegateEvent);
+        } catch (err) {
+          // One bad listener must not stop the others, and must not take
+          // down the socket's message handler.
+          console.error("delegate event handler failed", err);
+        }
+      }
+      return;
+    }
+
+    if (!msg.id) return;
     const entry = this.pending.get(msg.id);
     if (!entry) return;
     this.pending.delete(msg.id);

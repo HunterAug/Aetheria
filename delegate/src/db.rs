@@ -213,6 +213,24 @@ impl LocalStore {
                 markdown         TEXT NOT NULL,
                 cached_at        INTEGER NOT NULL
             );
+
+            -- Every post this delegate has already accounted for as far as
+            -- desktop notifications are concerned (see `watcher.rs`). A row
+            -- here means "do not toast about this post again" - either
+            -- because it was toasted once already, or because it was
+            -- deliberately absorbed silently the first time a publisher's
+            -- index was read (otherwise following someone with 40 old posts,
+            -- or simply restarting the app, would fire 40 toasts at once).
+            -- Deliberately its own table rather than reusing
+            -- `cached_remote_posts`: that one is written by every feed
+            -- refresh as a rendering cache, so keying notifications off it
+            -- would mean a feed the user never looked at silently suppressed
+            -- the notification for a post they hadn't seen.
+            CREATE TABLE IF NOT EXISTS notified_posts (
+                post_id       BLOB PRIMARY KEY,
+                author_pubkey BLOB NOT NULL,
+                notified_at   INTEGER NOT NULL
+            );
             "#,
         )?;
         // `profile`/`followed_publishers` are brand-new tables (no existing
@@ -693,6 +711,30 @@ impl LocalStore {
             epoch_id: epoch_id as u32,
             published_at: published_at as u64,
         })
+    }
+
+    /// Atomically claims the right to notify about `post_id` exactly once.
+    ///
+    /// Returns `true` only for the first caller to ever see this post,
+    /// `false` for every caller afterwards - the whole check-and-record is a
+    /// single `INSERT OR IGNORE`, so two code paths racing over the same new
+    /// post (a live subscription push and the polling backstop, see
+    /// `watcher.rs`) can never both decide to toast about it. The same call
+    /// with the result ignored is how the watcher *silences* a post it has
+    /// decided not to announce (a publisher's backlog at follow time, or
+    /// everything already published when the app starts).
+    pub fn claim_post_notification(
+        &self,
+        post_id: &[u8; 16],
+        author_pubkey: &[u8; 32],
+        now: u64,
+    ) -> Result<bool> {
+        let inserted = self.conn.lock().expect("db mutex poisoned").execute(
+            "INSERT OR IGNORE INTO notified_posts (post_id, author_pubkey, notified_at)
+             VALUES (?1, ?2, ?3)",
+            params![post_id.as_slice(), author_pubkey.as_slice(), now as i64],
+        )?;
+        Ok(inserted > 0)
     }
 
     /// Upserts the actual markdown content of a post once successfully
