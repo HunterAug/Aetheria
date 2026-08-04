@@ -621,7 +621,10 @@ fn publisher_profile_key_for(author_pubkey: [u8; 32]) -> Result<ContractKey> {
     Ok(ContractKey::from_params_and_code(&params, &*code))
 }
 
-fn content_index_key_for(author_pubkey: [u8; 32]) -> Result<ContractKey> {
+/// Public because `watcher.rs` needs the same key to `subscribe` to a
+/// followed publisher's index - it's the exact key `fetch_remote_posts` GETs
+/// below, so a push and a poll are always talking about the same contract.
+pub fn content_index_key_for(author_pubkey: [u8; 32]) -> Result<ContractKey> {
     let code = load_code(CONTENT_INDEX_CONTRACT_WASM)?;
     let params = Parameters::from(author_pubkey.to_vec());
     Ok(ContractKey::from_params_and_code(&params, &*code))
@@ -706,8 +709,27 @@ pub async fn fetch_remote_posts(
     else {
         return Ok(Vec::new());
     };
-    let state: ContentIndexState = ciborium::from_reader(bytes.as_slice())
-        .context("decoding remote ContentIndexContract state")?;
+    decode_verified_content_index(&bytes, author_pubkey)
+}
+
+/// Decodes raw `ContentIndexContract` bytes into that publisher's verified
+/// post headers - factored out of `fetch_remote_posts` because `watcher.rs`
+/// has to do exactly the same thing to bytes that arrived as a *push*
+/// (`ContractResponse::UpdateNotification`) rather than as the answer to a
+/// GET, and a pushed index deserves precisely the same distrust as a fetched
+/// one: neither is signed as a whole, only the individual headers are.
+///
+/// Works unchanged on a delta as well as a full state: `ContentIndexContract`'s
+/// `get_state_delta` emits a `ContentIndexState` carrying just the posts the
+/// peer didn't know about, i.e. the same struct with a shorter `posts` list
+/// (see that contract's source), which is exactly what a caller wants either
+/// way.
+pub fn decode_verified_content_index(
+    bytes: &[u8],
+    author_pubkey: [u8; 32],
+) -> Result<Vec<PostMetadataHeader>> {
+    let state: ContentIndexState =
+        ciborium::from_reader(bytes).context("decoding remote ContentIndexContract state")?;
 
     let verifying_key = VerifyingKey::from_bytes(&author_pubkey)
         .context("author_pubkey is not a valid Ed25519 verifying key")?;

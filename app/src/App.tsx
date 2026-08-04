@@ -14,6 +14,7 @@ import FirstRunNamePrompt from "./components/FirstRunNamePrompt";
 import UnlockScreen from "./components/UnlockScreen";
 import OpenedPostView from "./components/OpenedPostView";
 import { delegate, type LockStatus, type OpenedPost } from "./lib/delegate";
+import { startNewPostNotifications } from "./lib/notifications";
 
 export type Tab =
   | "editor"
@@ -50,6 +51,16 @@ export default function App() {
       // states rather than getting stuck on a blank screen forever.
       .catch(() => setLockStatus({ locked: false, has_existing_identity: true }));
   }, []);
+
+  // Desktop notifications for new posts from publishers you follow. Only
+  // once unlocked: the delegate has no followed list (and no identity at
+  // all) before that, so there's nothing to be notified about. Runs for as
+  // long as the app does - including while the window is hidden in the
+  // system tray, which is what makes it worth having.
+  useEffect(() => {
+    if (!lockStatus || lockStatus.locked) return;
+    return startNewPostNotifications();
+  }, [lockStatus]);
 
   useEffect(() => {
     if (!lockStatus || lockStatus.locked) return;

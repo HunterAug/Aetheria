@@ -39,6 +39,7 @@ use crate::{
     freenet_bridge::FreenetBridge,
     keys::DelegateKeys,
     nwc::NwcClient,
+    watcher::{self, EventSender, WatcherHandle},
 };
 use anyhow::{Context, Result};
 use base64::Engine;
@@ -200,6 +201,13 @@ struct Unlocked {
     freenet: FreenetBridge,
     nwc: NwcClient,
     identity: PublisherIdentity,
+    /// The live "someone you follow just published" watcher (`watcher.rs`),
+    /// started once per unlock. Held here so `follow_publisher`/
+    /// `unfollow_publisher` can tell it the followed set changed - it owns
+    /// its own Freenet connection and its own task, and never touches this
+    /// `Delegate` (it shares only the `LocalStore` behind an `Arc`), so it
+    /// can't deadlock against an in-flight IPC request.
+    watcher: WatcherHandle,
     /// Optional 2% platform fee wallet (design doc §6.3) - disconnected
     /// unless `AETHERIA_PLATFORM_FEE_NWC` was set at startup (see
     /// `connect_platform_fee_wallet`). `handle_subscribe` checks
@@ -208,9 +216,17 @@ struct Unlocked {
 }
 
 struct Delegate {
-    db: LocalStore,
+    /// Shared rather than owned since `watcher.rs`'s background task reads
+    /// and writes the same tables (followed publishers, the durable remote
+    /// post cache, the notification claims) from outside any IPC request.
+    /// `LocalStore` already guards its `rusqlite::Connection` with a mutex of
+    /// its own, so sharing it is a matter of ownership, not new locking.
+    db: Arc<LocalStore>,
     identity_key_path: PathBuf,
     unlocked: Option<Unlocked>,
+    /// Broadcast side of the server-push channel - see `serve`'s per-
+    /// connection forwarder and `watcher.rs`'s module docs.
+    events: EventSender,
 }
 
 impl Delegate {
@@ -231,11 +247,20 @@ impl Delegate {
     }
 }
 
+/// How many server-push events can be buffered per connected UI before the
+/// slowest one starts missing them. A UI that falls this far behind on
+/// "somebody published" events has bigger problems than the events; the
+/// `Lagged` case below is logged rather than silently ignored, and the posts
+/// themselves are never lost (they're in the durable cache and the feeds).
+const EVENT_BUFFER: usize = 64;
+
 pub async fn serve(port: u16, db: LocalStore, identity_key_path: PathBuf) -> Result<()> {
+    let (events, _) = tokio::sync::broadcast::channel(EVENT_BUFFER);
     let delegate = Arc::new(Mutex::new(Delegate {
-        db,
+        db: Arc::new(db),
         identity_key_path: identity_key_path.clone(),
         unlocked: None,
+        events: events.clone(),
     }));
 
     tokio::spawn(try_legacy_auto_unlock(delegate.clone(), identity_key_path));
@@ -247,18 +272,60 @@ pub async fn serve(port: u16, db: LocalStore, identity_key_path: PathBuf) -> Res
     while let Ok((stream, peer)) = listener.accept().await {
         tracing::debug!(%peer, "UI connection accepted");
         let delegate = delegate.clone();
+        let mut event_rx = events.subscribe();
         tokio::spawn(async move {
             let Ok(ws) = tokio_tungstenite::accept_async(stream).await else {
                 return;
             };
-            let (mut write, mut read) = ws.split();
+            let (write, mut read) = ws.split();
+            // Shared because this connection now has two writers: the
+            // request/response loop below, and the push forwarder. The
+            // protocol stays exactly as it was for replies - a push is
+            // distinguished purely by carrying `"event"` and no `"id"`, so a
+            // client that doesn't know about pushes (or an older UI build)
+            // simply ignores them instead of mis-resolving a request.
+            let write = Arc::new(Mutex::new(write));
+
+            let forward_to = write.clone();
+            let forwarder = tokio::spawn(async move {
+                loop {
+                    match event_rx.recv().await {
+                        Ok(event) => {
+                            let text = event.to_string();
+                            if forward_to
+                                .lock()
+                                .await
+                                .send(Message::Text(text.into()))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                            tracing::warn!(missed, "a UI connection missed server-push events");
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+
             while let Some(Ok(msg)) = read.next().await {
                 let Message::Text(text) = msg else { continue };
                 let reply = handle_message(&delegate, &text).await;
-                if write.send(Message::Text(reply.into())).await.is_err() {
+                if write
+                    .lock()
+                    .await
+                    .send(Message::Text(reply.into()))
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
+            // The read half is gone, so nothing can be replied to and nobody
+            // is reading pushes on this socket either.
+            forwarder.abort();
         });
     }
 
@@ -336,12 +403,19 @@ async fn finish_unlock(delegate: &mut Delegate, keys: DelegateKeys) -> Result<()
     );
     let nwc = NwcClient::disconnected();
     let platform_fee = connect_platform_fee_wallet().await;
+    // Started here rather than in `serve()` because there is no followed-
+    // publisher list to watch (and no Freenet identity at all) until an
+    // identity is actually unlocked. It opens its own connection to the node
+    // and runs independently from this point on - a failure inside it is
+    // logged by the task itself and never propagates back into unlock.
+    let watcher = watcher::spawn(delegate.db.clone(), delegate.events.clone());
     delegate.unlocked = Some(Unlocked {
         keys,
         freenet,
         nwc,
         identity,
         platform_fee,
+        watcher,
     });
     Ok(())
 }
@@ -1132,6 +1206,11 @@ async fn handle_follow_publisher(
         profile.avatar_freenet_key.as_deref(),
         now,
     )?;
+    // Start watching them for new posts right away rather than at the
+    // watcher's next poll tick - following someone and then having their
+    // next post arrive silently for three minutes would be a strange first
+    // impression of the feature.
+    delegate.unlocked().watcher.refresh();
 
     Ok(serde_json::json!({
         "author_pubkey": author_pubkey_hex,
@@ -1145,6 +1224,10 @@ async fn handle_follow_publisher(
 fn handle_unfollow_publisher(delegate: &Delegate, author_pubkey_hex: &str) -> Result<serde_json::Value> {
     let author_pubkey: [u8; 32] = hex::decode_array(author_pubkey_hex)?;
     delegate.db.unfollow_publisher(&author_pubkey)?;
+    // Stops the notifications too - the watcher rebuilds its Freenet
+    // subscriptions from the (now shorter) followed list, since Freenet's
+    // client protocol has no unsubscribe (see `FreenetBridge::subscribe`).
+    delegate.unlocked().watcher.refresh();
     Ok(serde_json::json!({ "author_pubkey": author_pubkey_hex }))
 }
 
