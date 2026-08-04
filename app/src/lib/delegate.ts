@@ -151,6 +151,38 @@ export interface UnlockResult {
   already_unlocked: boolean;
 }
 
+/// Live health of the delegate's connection to the Freenet network - see
+/// `delegate/src/ipc.rs`'s `handle_get_network_status`.
+///
+/// The distinction that matters: a local Freenet node can be running and
+/// answering its API perfectly while being connected to **zero** peers, in
+/// which case every feed looks empty and nothing publishes. That is
+/// `"isolated"`, and it is indistinguishable from `"connected"` by any other
+/// signal the UI has.
+export interface NetworkStatus {
+  /// - `connected` - the node holds at least one peer connection.
+  /// - `isolated`  - the node is up and answering but has **no** peers.
+  ///                 Commonly a VPN or a restrictive firewall breaking NAT
+  ///                 hole-punching.
+  /// - `unknown`   - the node didn't answer the status query (`query_error`).
+  /// - `locked`    - the delegate hasn't been unlocked yet, so no Freenet
+  ///                 connection exists yet. Not an error.
+  state: "connected" | "isolated" | "unknown" | "locked";
+  freenet_connected: boolean;
+  /// Peers the node reports ring connections to. `null` only when the query
+  /// itself failed - `0` is a real answer, not a missing one.
+  peer_count: number | null;
+  node_peer_id: string | null;
+  /// Seconds since one of this delegate's own contract operations last
+  /// succeeded - a second, independent signal from `peer_count` (which is
+  /// the node's self-report). `null` if none has yet on this connection.
+  last_successful_operation_secs_ago: number | null;
+  /// The most recent contract-operation failure, if the last one failed.
+  last_error: string | null;
+  /// Why `peer_count` is `null`, if it is.
+  query_error: string | null;
+}
+
 /// A post that's been opened and is ready to render - the shape
 /// `ReaderFeed.tsx`/`Following.tsx` build once they have both the feed
 /// item's metadata (title, author) and the fetched markdown body.
@@ -233,6 +265,15 @@ class DelegateClient {
   /// identity rejects with a retryable error, not a crash.
   unlock(passphrase: string): Promise<UnlockResult> {
     return this.call("unlock", { passphrase });
+  }
+
+  /// Live Freenet connectivity, asked of the local node itself (real peer
+  /// count, not an inference). Answerable even while the delegate is locked,
+  /// where it honestly reports `state: "locked"` rather than a fake
+  /// connected/disconnected verdict. Safe to poll - the delegate answers it
+  /// from a bounded, purely-local query against the node.
+  getNetworkStatus(): Promise<NetworkStatus> {
+    return this.call("get_network_status");
   }
 
   listPosts(): Promise<PostSummary[]> {

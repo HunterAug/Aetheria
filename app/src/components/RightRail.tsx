@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { SearchIcon, LockIcon } from "./icons";
 import { delegate, type FeedItem, type OpenedPost } from "../lib/delegate";
 import { openFeedItem } from "../lib/feedItem";
+import NetworkStatusPanel from "./NetworkStatusPanel";
 
 interface PublisherResult {
   author_pubkey: string;
@@ -204,6 +205,8 @@ export default function RightRail({
           no publisher account, no platform that can pull it down.
         </p>
       </div>
+
+      <NetworkStatusPanel />
 
       <div className="rounded-xl border border-ink-800 bg-ink-900 p-5 text-sm text-neutral-400 leading-relaxed">
         <h3 className="text-neutral-100 font-semibold mb-1">

@@ -172,6 +172,21 @@ enum Request {
     GetRemotePost {
         post_contract_id: String,
     },
+    /// Is this delegate's Freenet node actually part of the network right
+    /// now? Answered by asking the node itself how many peers it holds ring
+    /// connections to (see `FreenetBridge::query_node_status`), alongside
+    /// this delegate's own observed contract-operation health.
+    ///
+    /// The third request answerable **while locked** (with `Unlock` and
+    /// `LockStatus`), because there is a genuinely different, honest answer
+    /// to give in that state - see `handle_get_network_status`.
+    ///
+    /// Exists because every previous way a Freenet connection could be
+    /// broken - a stale port squatter, a node too old to talk to the
+    /// network, a VPN breaking NAT hole-punching - produced the exact same
+    /// visible symptom in the UI: empty feeds, indistinguishable from a
+    /// network that genuinely has nothing to show.
+    GetNetworkStatus,
 }
 
 #[derive(Deserialize)]
@@ -400,6 +415,71 @@ async fn handle_unlock(delegate: &mut Delegate, passphrase: &str) -> Result<serd
     Ok(serde_json::json!({ "created_new_identity": is_new, "already_unlocked": false }))
 }
 
+/// Honest, live answer to "is Freenet actually working right now?".
+///
+/// **Why this is answerable while locked**: the `FreenetBridge` genuinely
+/// does not exist until `finish_unlock` builds one - the connection is
+/// established as part of unlocking, not before it (see `Unlocked`, which
+/// exists precisely because a `FreenetBridge` has no meaningful empty
+/// state). Rather than force a connection to exist earlier than it
+/// structurally can, this reports `state: "locked"` in that window, which is
+/// the truthful answer: there is no Freenet connection yet *because nothing
+/// has unlocked one*, which is different from one being broken. The UI only
+/// renders its indicator after unlock anyway, so in practice this branch is
+/// for any other caller (a script, a future pre-unlock diagnostic screen)
+/// that asks early.
+///
+/// `state` is the single field a UI should switch on:
+/// - `"connected"`  - the node reports at least one peer connection.
+/// - `"isolated"`   - the node is up and answering, but is connected to
+///                    **zero** peers. Feeds will look empty and nothing will
+///                    publish. This is the state a VPN or a restrictive
+///                    firewall produces, and the one this whole feature
+///                    exists to stop being invisible.
+/// - `"unknown"`    - the node did not answer the status query at all
+///                    (`query_error` says why). Usually means the local node
+///                    process died or its API socket dropped.
+/// - `"locked"`     - see above.
+///
+/// `last_successful_operation_secs_ago` / `last_error` are a *second,
+/// independent* signal from the first: they come from this delegate's own
+/// observed contract-operation outcomes (`FreenetBridge::record_success`/
+/// `record_failure`), not from the node's self-report. Kept alongside the
+/// peer count rather than folded into `state` because they can genuinely
+/// disagree in an informative way - e.g. a node with healthy peer
+/// connections whose operations are all still timing out, which is the
+/// documented gateway-network flakiness rather than a connectivity problem.
+async fn handle_get_network_status(delegate: &Delegate) -> Result<serde_json::Value> {
+    let Some(unlocked) = delegate.unlocked.as_ref() else {
+        return Ok(serde_json::json!({
+            "state": "locked",
+            "freenet_connected": false,
+            "peer_count": serde_json::Value::Null,
+            "node_peer_id": serde_json::Value::Null,
+            "last_successful_operation_secs_ago": serde_json::Value::Null,
+            "last_error": serde_json::Value::Null,
+            "query_error": serde_json::Value::Null,
+        }));
+    };
+
+    let status = unlocked.freenet.query_node_status().await;
+    let state = match status.peer_count {
+        Some(0) => "isolated",
+        Some(_) => "connected",
+        None => "unknown",
+    };
+
+    Ok(serde_json::json!({
+        "state": state,
+        "freenet_connected": state == "connected",
+        "peer_count": status.peer_count,
+        "node_peer_id": status.node_peer_id,
+        "last_successful_operation_secs_ago": status.last_success_secs_ago,
+        "last_error": status.last_error,
+        "query_error": status.query_error,
+    }))
+}
+
 async fn handle_message(delegate: &Arc<Mutex<Delegate>>, text: &str) -> String {
     let envelope: Envelope = match serde_json::from_str(text) {
         Ok(e) => e,
@@ -442,13 +522,16 @@ async fn handle_request(delegate: &mut Delegate, request: Request) -> Result<ser
             "locked": delegate.unlocked.is_none(),
             "has_existing_identity": delegate.identity_key_path.exists(),
         })),
+        Request::GetNetworkStatus => handle_get_network_status(delegate).await,
         other => {
             anyhow::ensure!(
                 delegate.unlocked.is_some(),
                 "delegate is locked - send `unlock` first"
             );
             match other {
-                Request::Unlock { .. } | Request::LockStatus => unreachable!("handled above"),
+                Request::Unlock { .. } | Request::LockStatus | Request::GetNetworkStatus => {
+                    unreachable!("handled above")
+                }
                 Request::ListPosts => handle_list_posts(delegate),
                 Request::GetPost { post_id } => handle_get_post(delegate, &post_id),
                 Request::PublishPost {
