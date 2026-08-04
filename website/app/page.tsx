@@ -4,11 +4,11 @@ import { isReleased } from "@/lib/config";
 const FEATURES = [
   {
     title: "Once they have it, it's theirs to keep",
-    body: "Freenet delivers your posts straight to your readers, no server in between. Once someone receives a post, it's saved on their own device — readable offline, permanently. No update, algorithm change, or shutdown can reach into their library and take it back.",
+    body: "Freenet delivers your posts straight to your readers, no server in between. Once someone receives a post, it's saved on their own device, readable offline, permanently. No update, algorithm change, or shutdown can reach into their library and take it back.",
   },
   {
     title: "No account for anyone to suspend",
-    body: "Your writing lives on Freenet, a peer-to-peer network with no central server. There's no company account to suspend and no single computer to unplug to make your publication disappear — whether the reason is a policy dispute or something more serious.",
+    body: "Your writing lives on Freenet, a peer-to-peer network with no central server. There's no company account to suspend and no single computer to unplug to make your publication disappear, whether the reason is a policy dispute or something more serious.",
   },
   {
     title: "You hold the keys",
@@ -32,8 +32,8 @@ export default async function Home() {
         </h1>
         <p className="mt-6 text-lg text-neutral-400 max-w-2xl mx-auto leading-relaxed">
           Substack can change its rules. Medium can reshuffle its paywall.
-          Any platform can suspend an account over a policy dispute — nothing
-          illegal required — and take your archive and your readers with it.
+          Any platform can suspend an account over a policy dispute (nothing
+          illegal required) and take your archive and your readers with it.
           Aetheria puts no company in the middle: your posts reach the people
           who follow you directly over Freenet, a peer-to-peer network, and
           once a reader has one, it's saved on their device for good. No

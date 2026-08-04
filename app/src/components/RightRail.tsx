@@ -200,7 +200,7 @@ export default function RightRail({
           Sovereign by design
         </h3>
         <p className="text-sm text-neutral-400 leading-relaxed">
-          Every post here is signed by your own keys and stored on Freenet —
+          Every post here is signed by your own keys and stored on Freenet:
           no publisher account, no platform that can pull it down.
         </p>
       </div>

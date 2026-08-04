@@ -1,6 +1,6 @@
 // Typed client for the local Delegate daemon's WebSocket IPC (see
 // delegate/src/ipc.rs). The UI never touches key material, ciphertext, or
-// Freenet contract calls directly — everything goes through this loopback
+// Freenet contract calls directly: everything goes through this loopback
 // socket, request/response pairs correlated by a generated `id`.
 
 const DELEGATE_IPC_URL = "ws://127.0.0.1:47021";
@@ -189,7 +189,7 @@ class DelegateClient {
       socket.addEventListener("message", (event) => this.handleMessage(event));
       socket.addEventListener("error", () => {
         this.connecting = null;
-        reject(new Error("could not reach the Aetheria delegate — is it running?"));
+        reject(new Error("could not reach the Aetheria delegate. Is it running?"));
       });
       socket.addEventListener("close", () => {
         this.ws = null;

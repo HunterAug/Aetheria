@@ -63,7 +63,7 @@ export default function Settings() {
       } else {
         setStatus({
           kind: "partial",
-          message: `Saved locally — not yet synced to the network (${
+          message: `Saved locally, not yet synced to the network (${
             result.network_error ?? "unknown error"
           }). It'll keep this device's copy either way.`,
         });
@@ -83,7 +83,7 @@ export default function Settings() {
       <h2 className="text-xl font-semibold text-neutral-100 mb-1">Settings</h2>
       <p className="text-sm text-neutral-500 mb-5">
         Your display name and avatar are shown on every post you publish, and
-        on your public profile — readers can click through from a post to see
+        on your public profile. Readers can click through from a post to see
         it.
       </p>
 

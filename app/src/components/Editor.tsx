@@ -44,7 +44,7 @@ export default function Editor() {
     <div className="px-6 py-5 max-w-2xl mx-auto">
       <h2 className="text-xl font-semibold text-neutral-100 mb-1">Draft</h2>
       <p className="text-sm text-neutral-500 mb-5">
-        Publishes to your local Delegate — subscriber posts are AES-256-GCM
+        Publishes to your local Delegate. Subscriber posts are AES-256-GCM
         encrypted with this epoch's key before they're stored.
       </p>
 
@@ -92,7 +92,7 @@ export default function Editor() {
 
         {status.kind === "success" && (
           <p className="text-sm text-aecyan-400">
-            Published (post {status.postId.slice(0, 8)}…) — check the Home tab.
+            Published (post {status.postId.slice(0, 8)}…). Check the Home tab.
           </p>
         )}
         {status.kind === "error" && (

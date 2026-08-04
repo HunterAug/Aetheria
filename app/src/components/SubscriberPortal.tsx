@@ -50,7 +50,7 @@ export default function SubscriberPortal() {
                   <p className="text-sm font-medium text-neutral-200">{tier.name}</p>
                   <p className="text-xs text-neutral-500">
                     {tier.price_sats_per_month.toLocaleString()} sats/month
-                    {tier.features.length > 0 ? ` — ${tier.features.join(", ")}` : ""}
+                    {tier.features.length > 0 ? ` (${tier.features.join(", ")})` : ""}
                   </p>
                 </div>
               ))}

@@ -103,7 +103,7 @@ export default function Following({
       )}
       {followed?.length === 0 && (
         <p className="text-sm text-neutral-500 px-6 py-8">
-          You're not following anyone yet — paste a publisher's pubkey above to get started.
+          You're not following anyone yet. Paste a publisher's pubkey above to get started.
         </p>
       )}
 

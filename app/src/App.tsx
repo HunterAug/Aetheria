@@ -109,7 +109,7 @@ export default function App() {
               <ReaderFeed
                 title="Home"
                 fetchItems={() => delegate.getFollowingFeed()}
-                emptyMessage="No posts yet — follow a publisher from the Following tab to see their posts here."
+                emptyMessage="No posts yet. Follow a publisher from the Following tab to see their posts here."
                 onOpenProfile={() => setTab("profile")}
                 onViewAuthor={setViewingAuthor}
               />
@@ -118,7 +118,7 @@ export default function App() {
               <ReaderFeed
                 title="Latest"
                 fetchItems={() => delegate.getLatestFeed()}
-                emptyMessage="No posts yet — be the first to publish one from the Draft tab."
+                emptyMessage="No posts yet. Be the first to publish one from the Draft tab."
                 onOpenProfile={() => setTab("profile")}
                 onViewAuthor={setViewingAuthor}
               />
