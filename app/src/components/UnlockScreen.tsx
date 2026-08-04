@@ -18,6 +18,11 @@ export default function UnlockScreen({
   const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Set only right after a brand-new identity is created, so the
+  // save-your-passphrase prompt below can render in its place - this is the
+  // one and only moment the passphrase is ever shown again (see the
+  // no-recovery warning above), never stored past this component's state.
+  const [justCreatedPassphrase, setJustCreatedPassphrase] = useState<string | null>(null);
 
   const mismatch = !hasExistingIdentity && confirm.length > 0 && passphrase !== confirm;
   const canSubmit =
@@ -29,11 +34,66 @@ export default function UnlockScreen({
     setError(null);
     try {
       await delegate.unlock(passphrase);
-      onUnlocked();
+      if (hasExistingIdentity) {
+        onUnlocked();
+      } else {
+        setJustCreatedPassphrase(passphrase);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setBusy(false);
     }
+  }
+
+  function downloadPassphrase() {
+    if (!justCreatedPassphrase) return;
+    const contents =
+      `Aetheria passphrase\n` +
+      `Saved: ${new Date().toISOString()}\n\n` +
+      `${justCreatedPassphrase}\n\n` +
+      `Keep this file somewhere private and offline (not a cloud-synced folder) -\n` +
+      `there is no way to recover your identity if this passphrase is lost.\n`;
+    const blob = new Blob([contents], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "aetheria-passphrase.txt";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  if (justCreatedPassphrase) {
+    return (
+      <div className="min-h-screen bg-ink-950 text-neutral-200 flex items-center justify-center px-4">
+        <div className="w-full max-w-sm rounded-xl border border-ink-700 bg-ink-900 p-6 shadow-2xl">
+          <h2 className="text-lg font-semibold text-neutral-100 mb-1">
+            Save your passphrase
+          </h2>
+          <p className="text-sm text-neutral-400 mb-4">
+            This is the only time Aetheria shows it to you. If it's lost,
+            your identity can't be recovered - no one, including us, can
+            reset it.
+          </p>
+          <div className="w-full rounded-lg bg-ink-950 border border-ink-700 p-2.5 text-sm text-neutral-200 mb-4 font-mono break-all select-all">
+            {justCreatedPassphrase}
+          </div>
+          <button
+            onClick={downloadPassphrase}
+            className="w-full rounded-lg border border-ink-700 text-neutral-200 text-sm font-semibold py-2.5 mb-2 hover:bg-ink-800 transition"
+          >
+            Download as .txt
+          </button>
+          <button
+            onClick={onUnlocked}
+            className="w-full rounded-lg bg-aetheria-gradient text-white text-sm font-semibold py-2.5 shadow-lg shadow-aeblue-600/20 hover:brightness-110 transition"
+          >
+            Continue to Aetheria
+          </button>
+        </div>
+      </div>
+    );
   }
 
   return (
