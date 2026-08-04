@@ -1069,6 +1069,214 @@ that subproject; this section covers the cross-cutting pieces.
   convention as the app itself), and both download links resolved with
   real, correct `Content-Length`s (not 404s or placeholders).
 
+## Live Freenet connectivity indicator (as of 2026-08-04)
+
+Written after a long debugging session where "why isn't Aetheria connecting
+to Freenet" took hours, and the real causes turned out to be a leftover
+process squatting port 7509, a stale bundled Freenet binary that needed an
+auto-update it couldn't apply itself, and finally **NordVPN routing all P2P
+traffic through a tunnel that broke NAT hole-punching entirely**. Every one
+of those produced the *identical* visible symptom: feeds just looked empty,
+with nothing anywhere in the UI indicating the node had zero real peer
+connections. A real end user hitting any of them - the VPN case especially,
+which is common - would conclude the app is broken or that the network is
+simply empty, with no way to tell those apart.
+
+Before this, the only connectivity indicator in the entire app was for the
+NWC Lightning wallet (`wallet_connected`, rendered in `Subscriptions.tsx`) -
+nothing at all for Freenet itself, which is both more fundamental and far
+more likely to silently fail.
+
+### There *is* a real node-status query - this is not an inference
+
+The important finding, and the reason this feature reports something
+trustworthy rather than a guess: `freenet-stdlib`'s client API **does**
+expose a direct node-diagnostics query, over the exact same
+`ws://127.0.0.1:7509/v1/contract/command?encodingProtocol=native` socket
+`FreenetBridge` already holds. Found by reading the crate source in the
+cargo registry cache (`freenet-stdlib-0.8.5/src/client_api/client_events.rs`),
+the same research method this file already documents for the WebSocket
+URL/encoding and `ContractInstanceId::from_base58` questions:
+
+- `ClientRequest::NodeQueries(NodeQuery::NodeDiagnostics { config })` →
+  `HostResponse::QueryResponse(QueryResponse::NodeDiagnostics(..))`, carrying
+  `NetworkInfo { connected_peers, active_connections }` and
+  `NodeInfo { peer_id, .. }`. `NodeDiagnosticsConfig::basic_status()` asks
+  for node info + network info only - deliberately not subscriptions,
+  contract states, or per-peer detail, since this runs every few seconds and
+  those make the node clone its full contract/subscription maps.
+- Confirmed the **node side** handles it too, not just that the type exists:
+  `freenet-0.2.119/src/client_events.rs` routes it to
+  `NodeEvent::QueryNodeDiagnostics`, and
+  `src/node/network_bridge/p2p_protoc.rs` answers it by walking
+  `op_manager.ring.connection_manager.get_connections_by_location()` and
+  deduplicating. **That is the same connection map the node's own
+  `ring_connections=N` / "Node isolated with zero ring connections" log lines
+  are computed from** - so this reports exactly what those logs report,
+  over the API instead of by scraping a log file. 0.2.119 is the version
+  bundled in `%LOCALAPPDATA%\Aetheria\freenet.exe` on this machine.
+- Because it's a **local, in-process** question for the node (it inspects its
+  own connection table; no gateway routing involved), `query_node_status`
+  deliberately has **no retry loop**, unlike every other method in
+  `freenet_bridge.rs`. There's no flaky remote hop that could make a single
+  attempt spuriously fail, which is exactly why a zero answer can be trusted
+  rather than written off as network flakiness.
+
+So: the direct-query path, not the infer-from-recent-operation-outcomes
+fallback. The operational signal below exists too, but as a genuinely
+*separate second* signal, not as a substitute.
+
+### What was built
+
+- **`delegate/src/freenet_bridge.rs`**: `query_node_status() -> NodeStatus`
+  (never returns `Err` - the whole point is reporting how broken things are,
+  so a failed query is data, not a caller-facing failure), plus an `OpHealth`
+  struct tracking `last_success`/`last_error` across every
+  `put_new`/`update_state`/`get_state`. Notes worth keeping:
+  - **`NODE_QUERY_TIMEOUT` (5s) is not optional.** `ipc.rs::handle_message`
+    holds the single global `Mutex<Delegate>` for the entire duration of
+    every request, so a `recv()` that never returns would wedge *every* other
+    IPC request - the whole UI, not just this indicator. A node that accepts
+    `NodeQueries` but never answers is precisely the failure this feature
+    exists to surface, so it has to be survivable. A late response is
+    harmless: it stays buffered and the next contract operation's recv loop
+    discards it through its existing "ignoring unrelated host response" arm.
+  - Only failures that **exhausted all `MAX_ATTEMPTS` retries** are recorded
+    as `last_error`; single transient attempt failures are already expected
+    on this network (see the environment notes above) and recording them
+    would make the signal noise.
+  - `get_state` returning `Ok(None)` (contract not found) counts as a
+    **success** - it's a real, complete answer from the node, and this signal
+    measures whether the node is answering, not whether a contract exists.
+  - `OpHealth` is a `std::sync::Mutex`, not a `tokio` one: it's held for two
+    field assignments with no `.await` between, so an async mutex would only
+    add a suspension point to every contract operation.
+- **`delegate/src/ipc.rs`**: `get_network_status`, the **third** request
+  answerable while locked (with `unlock`/`lock_status`). Returns
+  `{ state, freenet_connected, peer_count, node_peer_id,
+  last_successful_operation_secs_ago, last_error, query_error }`. `state` is
+  the one field a UI should switch on:
+  - `connected` - node reports ≥1 peer.
+  - `isolated` - node is up and answering but has **zero** peers. Feeds look
+    empty, nothing publishes. The VPN/firewall state; the reason this exists.
+  - `unknown` - the node didn't answer the query at all (`query_error` says
+    why). Usually the node process died or its API socket dropped.
+  - `locked` - see below.
+- **`app/src/components/NetworkStatusPanel.tsx`** (new), rendered by
+  `RightRail.tsx` directly above the pre-existing "Local Delegate" block, so
+  it's persistently visible on every tab rather than buried in Settings.
+  Polls every 5s. Kept as its own component rather than inlined because
+  `RightRail.tsx` is already 200+ lines of unrelated search logic. State
+  descriptions live in a `describe()` lookup rather than nested JSX ternaries
+  specifically so no state can silently fall through to a default that
+  *overstates* connectivity. An `inFlight` ref skips a tick rather than
+  piling up requests (the delegate serializes all IPC behind one lock, so a
+  poll can legitimately queue behind a long feed fetch), and a failed poll
+  sets an "unreachable" flag without clearing the last known status, so a
+  delegate hiccup doesn't flash the panel back to "Checking…".
+- **`app/src/lib/delegate.ts`**: `getNetworkStatus()` + `NetworkStatus` type,
+  matching the existing typed-client patterns.
+
+**Judgment call on the locked state** (point 4 of the task): the Freenet
+connection genuinely does not exist until after unlock - `finish_unlock`
+is what builds the `FreenetBridge`, and `Unlocked` exists precisely because a
+bridge has no meaningful empty state. Rather than force a connection to
+exist earlier than it structurally can, `get_network_status` is answerable
+while locked and reports `state: "locked"`, which is the truthful answer:
+there's no connection *because nothing has unlocked one yet*, which is
+different from one being broken. The UI only renders the panel after unlock
+anyway, so in practice that branch serves scripts and any future pre-unlock
+diagnostic screen.
+
+**Why `last_successful_operation_secs_ago`/`last_error` are kept alongside
+the peer count rather than folded into `state`**: they can disagree in an
+informative way. A node with healthy peer connections whose operations are
+all still timing out is the documented gateway-network flakiness, not a
+connectivity problem, and the panel says so with a separate amber line
+instead of contradicting its own headline.
+
+### Verified live, 2026-08-04
+
+Real scratch `freenet` node(s) + the real delegate binary against a scratch
+`AETHERIA_DATA_DIR_OVERRIDE` identity, driven both through the real IPC
+socket (Node scripts) and through the real browser UI (Vite dev server on
+5173, DOM asserted directly for both text and the status-dot class):
+
+- **`connected`** - real public network, node reporting **43 peers**; UI
+  showed a green dot and "Connected — 43 peers". Peer count tracked the live
+  network genuinely growing over a single session (28 → 38 → 43, and on a
+  separate cold start 8 → 9 → 10 → 11 across successive polls).
+  `last_successful_operation_secs_ago` ticked 40 → 42 → 44 across polls
+  spaced exactly 2s apart, confirming it's real elapsed time from the real
+  contract publish at startup, not a fabricated value.
+- **`unknown`** - killed the Freenet node process out from under a running
+  delegate with the UI open and untouched. Within the 5s polling interval
+  and **with no page reload**, the panel flipped on its own from green
+  "Connected — 43 peers" to a red dot and "Can't reach your Freenet node",
+  showing the real underlying error ("sending node diagnostics query:
+  unhandled error: client error: comm channel between client/host closed").
+  This is the single most important behaviour of the feature and it was
+  observed directly, not reasoned about.
+- **`isolated`** - reproduced two independent ways. (1) Caught the genuine
+  zero-peer window of a cold network-mode node by starting the delegate
+  *first* (its `connect_local` retry attaches the instant the node binds) and
+  polling every 250ms: a real `state=isolated peers=0` held for ~2.4s before
+  transitioning to `connected peers=1`. (2) For a *sustained* window a node
+  was run with `--skip-load-from-network --gateway
+  "127.0.0.1:31399,<bogus-key>"` - explicit `--gateway` CLI entries replace
+  the on-disk cache, so the node comes up healthy, serves its API, and can
+  reach nobody: a faithful stand-in for the VPN/firewall case. Against it the
+  IPC op returned `state: "isolated", peer_count: 0` steadily, and the UI
+  rendered an amber dot with "No peer connections" and the plain-language
+  VPN/firewall hint.
+  - Note: **`gateways.toml` cannot be used for this** - freenet rewrites it
+    with the real default gateways on every startup (tried both blanking it
+    and pointing it at an unreachable host; both were overwritten). The
+    `--skip-load-from-network` + `--gateway` CLI combination is the way.
+- **`freenet local` mode is not a zero-peer node** - it answers the
+  diagnostics query with "not supported" (local mode has no P2P network
+  bridge to service `QueryNodeDiagnostics` at all), which correctly surfaces
+  as `unknown` with that error text rather than crashing or being mistaken
+  for `isolated`. Two distinct real causes both landing in `unknown` with
+  distinguishable messages.
+- **`delegate/src/network_status_e2e_test.rs`** (new, `#[ignore]`d, same
+  shape as the other two e2e tests - run with
+  `cargo test network_status_e2e -- --ignored --nocapture`). Deliberately
+  does **not** assert `peer_count > 0` - a cold or VPN-blocked node
+  legitimately reports zero and that's the state the feature exists for.
+  It asserts the node *answered*: `peer_count.is_some()` and
+  `query_error.is_none()`, only possible if the query really round-tripped.
+  A second test drives a real `get_state` and asserts the operational signal
+  moved off `None`. Both branches of that second test were exercised for
+  real across runs: the success branch against the healthy node, and the
+  failure branch against the isolated node, where the GET failed with the
+  node's own honest "peer has not joined the network yet" and was correctly
+  recorded as `last_error`.
+- `cargo test` (15 passed, 4 ignored) and `npx tsc -b` both clean;
+  `cargo build --release` clean.
+
+### Known gaps / follow-ups
+
+- **`FreenetBridge` has no reconnect logic** (pre-existing, not introduced
+  here): the WebSocket is established once during `finish_unlock`, so once
+  the node process dies the delegate stays in `unknown` permanently until it
+  is itself restarted - observed directly during the kill test above. The
+  indicator reports this accurately and actionably, but auto-reconnect is
+  the obvious next step now that there's finally a signal that would drive
+  it.
+- The peer count is the node's **ring connection count**, which is about
+  whether this node is meaningfully embedded in the network. It is not a
+  guarantee that any particular GET/PUT will succeed - that's what the
+  separate operational-health line is for. Neither signal is a promise, and
+  the UI wording avoids implying one.
+- No history/sparkline - the panel shows current state only. Nothing tracks
+  how long a node has been isolated, which would make "cold start, wait a
+  minute" vs. "your VPN is breaking this" distinguishable automatically
+  rather than by the hint text listing both.
+- The panel polls unconditionally while mounted, including when the window
+  is in the background. At one 5s local query it's negligible, but it's not
+  paused on `visibilitychange`.
+
 ## Known stub / unimplemented areas
 
 - `FreenetBridge::subscribe` — sends nothing, still `todo!()`

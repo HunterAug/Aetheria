@@ -16,6 +16,8 @@ pub mod nwc;
 #[cfg(test)]
 mod follow_publisher_e2e_test;
 #[cfg(test)]
+mod network_status_e2e_test;
+#[cfg(test)]
 mod subscriber_registry_e2e_test;
 
 /// Local WebSocket port the UI (React/Tauri) connects to for IPC.

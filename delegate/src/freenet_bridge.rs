@@ -45,14 +45,15 @@
 
 use anyhow::{Context, Result};
 use freenet_stdlib::client_api::{
-    ClientRequest, ContractRequest, ContractResponse, HostResponse, WebApi,
+    ClientRequest, ContractRequest, ContractResponse, HostResponse, NodeDiagnosticsConfig,
+    NodeQuery, QueryResponse, WebApi,
 };
 use freenet_stdlib::prelude::{
     ContractCode, ContractContainer, ContractInstanceId, ContractKey, ContractWasmAPIVersion,
     Parameters, RelatedContracts, State, UpdateData, WrappedContract, WrappedState,
 };
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 pub const NODE_WS_URL: &str = "ws://127.0.0.1:7509/v1/contract/command?encodingProtocol=native";
@@ -83,11 +84,69 @@ const RETRY_DELAY: Duration = Duration::from_millis(1500);
 const CONNECT_MAX_ATTEMPTS: u32 = 20;
 const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(1500);
 
+/// Hard ceiling on `query_node_status`'s send+recv round trip.
+///
+/// **Not optional.** `ipc.rs::handle_message` holds the single global
+/// `Mutex<Delegate>` for the entire duration of every request, so a
+/// `recv()` that never returns here would wedge *every* other IPC request
+/// (feeds, publish, unlock) behind it - the UI would hang, not just the
+/// status indicator. A node that accepts `NodeQueries` but never answers is
+/// exactly the kind of failure this feature exists to make visible, so it
+/// has to be survivable rather than fatal. 5s is generous for a purely
+/// local, in-process query against a node on loopback (no gateway routing
+/// is involved - see `NodeQuery::NodeDiagnostics` below).
+///
+/// A response that arrives *after* this timeout is harmless: it stays
+/// buffered on the socket and the next contract operation's recv loop
+/// discards it through its existing "ignoring unrelated host response" arm,
+/// which already tolerates arbitrary interleaved responses.
+const NODE_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Real observed health of contract operations against the node, updated by
+/// every `put_new`/`update_state`/`get_state` call below.
+///
+/// Deliberately a `std::sync::Mutex`, not a `tokio::sync::Mutex`: it is only
+/// ever held for a couple of field assignments with no `.await` in between,
+/// so an async mutex would buy nothing and add a suspension point to every
+/// contract operation.
+#[derive(Default)]
+struct OpHealth {
+    /// When a contract operation last completed a real round trip to the
+    /// node. `None` until the first one does.
+    last_success: Option<Instant>,
+    /// The error from the most recent *failed* operation (after all its
+    /// retries were exhausted), cleared by the next success. This is what
+    /// distinguishes "quiet because nothing has been asked of the network"
+    /// from "quiet because everything asked of it is failing".
+    last_error: Option<String>,
+}
+
+/// A point-in-time answer to "is this delegate's Freenet node actually part
+/// of the network right now?" - see `FreenetBridge::query_node_status`.
+#[derive(Debug, Clone)]
+pub struct NodeStatus {
+    /// Peers the node currently holds ring connections to, straight from the
+    /// node's own connection manager. `None` only if the diagnostics query
+    /// itself failed (see `query_error`) - `Some(0)` is a real, meaningful
+    /// answer meaning "the node is running but isolated".
+    pub peer_count: Option<u32>,
+    /// The node's own peer id, when it reported one.
+    pub node_peer_id: Option<String>,
+    /// Why `peer_count` is `None`, if it is.
+    pub query_error: Option<String>,
+    /// Seconds since a contract operation last succeeded, or `None` if none
+    /// ever has on this connection.
+    pub last_success_secs_ago: Option<u64>,
+    /// The most recent contract-operation failure, if the last one failed.
+    pub last_error: Option<String>,
+}
+
 pub struct FreenetBridge {
     // A single shared connection, guarded so a send+recv round trip for one
     // request completes atomically w.r.t. any other caller - two interleaved
     // requests on the same socket could otherwise read each other's response.
     api: Mutex<WebApi>,
+    health: std::sync::Mutex<OpHealth>,
 }
 
 impl FreenetBridge {
@@ -104,6 +163,7 @@ impl FreenetBridge {
                     }
                     return Ok(Self {
                         api: Mutex::new(WebApi::start(stream)),
+                        health: std::sync::Mutex::new(OpHealth::default()),
                     });
                 }
                 Err(e) if attempt < CONNECT_MAX_ATTEMPTS => {
@@ -124,6 +184,126 @@ impl FreenetBridge {
             }
         }
         unreachable!("loop above always returns on its last iteration")
+    }
+
+    /// Records that a contract operation completed a real round trip to the
+    /// node, clearing any previously-recorded failure.
+    fn record_success(&self) {
+        let mut health = self.health.lock().expect("op-health mutex poisoned");
+        health.last_success = Some(Instant::now());
+        health.last_error = None;
+    }
+
+    /// Records a contract operation that failed *after exhausting its
+    /// retries* - transient single-attempt failures are already expected on
+    /// this network (see `MAX_ATTEMPTS`) and would make this signal noise
+    /// rather than information if recorded individually.
+    fn record_failure(&self, error: &anyhow::Error) {
+        let mut health = self.health.lock().expect("op-health mutex poisoned");
+        health.last_error = Some(error.to_string());
+    }
+
+    /// Asks the local node directly how many peers it is actually connected
+    /// to, plus the delegate's own observed contract-operation health.
+    ///
+    /// This is a **real query answered by the node**, not an inference:
+    /// `NodeQuery::NodeDiagnostics` with `include_network_info` set makes the
+    /// node walk `op_manager.ring.connection_manager.get_connections_by_location()`
+    /// and return the deduplicated peer list as `NetworkInfo.active_connections`
+    /// (freenet-0.2.119 `src/node/network_bridge/p2p_protoc.rs`, the
+    /// `QueryNodeDiagnostics` arm - read from the cargo registry cache the
+    /// same way this module's WebSocket-URL and encoding questions were
+    /// settled). That is the *same* connection map the node's own
+    /// `ring_connections=N` / "Node isolated with zero ring connections" log
+    /// lines are computed from, so this reports exactly what those logs
+    /// report - just over the API instead of by scraping a log file.
+    ///
+    /// Crucially this is a **local, in-process** question for the node - it
+    /// inspects its own connection table and answers immediately, with no
+    /// gateway routing involved. So unlike every other method here it needs
+    /// no retry loop: there is no flaky remote hop that could make a bare
+    /// attempt spuriously fail. It also means a *zero* answer is trustworthy
+    /// rather than possibly-just-network-flakiness, which is the entire
+    /// point - `Some(0)` is the real, common "VPN or firewall is blocking
+    /// NAT hole-punching, this node is talking to nobody" state.
+    ///
+    /// Never returns `Err`: the whole purpose is reporting how broken things
+    /// currently are, so a failed query is data (`query_error`), not a reason
+    /// to fail the caller.
+    pub async fn query_node_status(&self) -> NodeStatus {
+        let (last_success_secs_ago, last_error) = {
+            let health = self.health.lock().expect("op-health mutex poisoned");
+            (
+                health.last_success.map(|at| at.elapsed().as_secs()),
+                health.last_error.clone(),
+            )
+        };
+
+        let request = ClientRequest::NodeQueries(NodeQuery::NodeDiagnostics {
+            // node_info + network_info only - no subscriptions, no contract
+            // states, no per-peer detail. Everything this needs, nothing that
+            // makes the node clone its full contract/subscription maps on a
+            // path that runs every few seconds.
+            config: NodeDiagnosticsConfig::basic_status(),
+        });
+
+        let mut api = self.api.lock().await;
+        let outcome = tokio::time::timeout(NODE_QUERY_TIMEOUT, async {
+            api.send(request)
+                .await
+                .map_err(|e| anyhow::anyhow!("sending node diagnostics query: {e}"))?;
+            loop {
+                match api.recv().await {
+                    Ok(HostResponse::QueryResponse(QueryResponse::NodeDiagnostics(report))) => {
+                        return Ok(report)
+                    }
+                    Ok(other) => {
+                        tracing::debug!(
+                            ?other,
+                            "ignoring unrelated host response while awaiting node diagnostics"
+                        );
+                        continue;
+                    }
+                    Err(e) => return Err(anyhow::anyhow!("node diagnostics query failed: {e}")),
+                }
+            }
+        })
+        .await;
+
+        let (peer_count, node_peer_id, query_error) = match outcome {
+            Ok(Ok(report)) => (
+                report
+                    .network_info
+                    .as_ref()
+                    .map(|info| info.active_connections as u32),
+                report.node_info.as_ref().map(|info| info.peer_id.clone()),
+                // A node that answered but omitted network_info entirely is a
+                // real (if unexpected) case worth naming rather than
+                // silently reporting as zero peers.
+                None,
+            ),
+            Ok(Err(e)) => (None, None, Some(e.to_string())),
+            Err(_elapsed) => (
+                None,
+                None,
+                Some(format!(
+                    "the local Freenet node did not answer a status query within {}s",
+                    NODE_QUERY_TIMEOUT.as_secs()
+                )),
+            ),
+        };
+
+        NodeStatus {
+            peer_count,
+            node_peer_id,
+            query_error: query_error.or_else(|| {
+                peer_count
+                    .is_none()
+                    .then(|| "the node answered but reported no network information".to_string())
+            }),
+            last_success_secs_ago,
+            last_error,
+        }
     }
 
     /// Publishes a brand-new contract instance (code + initial state) and
@@ -169,12 +349,18 @@ impl FreenetBridge {
             };
 
             match outcome {
-                Ok(key) => return Ok(key),
+                Ok(key) => {
+                    self.record_success();
+                    return Ok(key);
+                }
                 Err(e) if attempt < MAX_ATTEMPTS => {
                     tracing::warn!(attempt, error = %e, "PUT failed, retrying");
                     tokio::time::sleep(RETRY_DELAY).await;
                 }
-                Err(e) => return Err(e),
+                Err(e) => {
+                    self.record_failure(&e);
+                    return Err(e);
+                }
             }
         }
         unreachable!("loop above always returns on its last iteration")
@@ -218,12 +404,18 @@ impl FreenetBridge {
             };
 
             match outcome {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    self.record_success();
+                    return Ok(());
+                }
                 Err(e) if attempt < MAX_ATTEMPTS => {
                     tracing::warn!(attempt, error = %e, "UPDATE failed, retrying");
                     tokio::time::sleep(RETRY_DELAY).await;
                 }
-                Err(e) => return Err(e),
+                Err(e) => {
+                    self.record_failure(&e);
+                    return Err(e);
+                }
             }
         }
         unreachable!("loop above always returns on its last iteration")
@@ -268,12 +460,22 @@ impl FreenetBridge {
             };
 
             match outcome {
-                Ok(value) => return Ok(value),
+                // `Ok(None)` (contract not found) counts as a success here on
+                // purpose: it is a real, complete answer from the node, which
+                // is exactly what this signal measures - not whether the
+                // contract happened to exist.
+                Ok(value) => {
+                    self.record_success();
+                    return Ok(value);
+                }
                 Err(e) if attempt < MAX_ATTEMPTS => {
                     tracing::warn!(attempt, error = %e, "GET failed, retrying");
                     tokio::time::sleep(RETRY_DELAY).await;
                 }
-                Err(e) => return Err(e),
+                Err(e) => {
+                    self.record_failure(&e);
+                    return Err(e);
+                }
             }
         }
         unreachable!("loop above always returns on its last iteration")
