@@ -1277,13 +1277,100 @@ socket (Node scripts) and through the real browser UI (Vite dev server on
   is in the background. At one 5s local query it's negligible, but it's not
   paused on `visibilitychange`.
 
+## Real desktop notifications: "someone you follow published" (as of 2026-08-04)
+
+Until now, "notify your subscribers" (the actual pitch this app is built
+around) was aspirational - every feed in `ipc.rs` is a pull, and a reader
+only learned about a new post by having the app open and hitting Refresh.
+This closes that gap for real, with no new server, relay, or mailer: the
+only moving parts are the user's own delegate and the Freenet node it
+already talks to.
+
+- **`FreenetBridge::subscribe` is real now** (`delegate/src/freenet_bridge.rs`,
+  previously the `todo!()` the "Known stub" section below used to describe).
+  Sends a real `ContractRequest::Subscribe` and returns the node's own
+  `subscribed` flag - `false` means the node accepted the request but isn't
+  watching that contract (typically nobody on the network is currently
+  hosting it), a real, reportable outcome distinct from an error. A new
+  `next_update_notification()` blocks for the next `UpdateNotification` push
+  on the connection. There is no `unsubscribe` - `ContractRequest` (freenet-
+  stdlib 0.8.5) has no such variant, so the only way to stop receiving a
+  publisher's pushes is to drop the connection and rebuild it from the
+  current follow list.
+- **`delegate/src/watcher.rs`** is the new module that actually consumes
+  this: for every followed publisher, it subscribes to their
+  `ContentIndexContract` (the same key `contracts::fetch_remote_posts`
+  already GETs - `content_index_key_for` is now `pub` so both call sites
+  derive the identical key), on a **dedicated second `FreenetBridge`
+  connection** rather than the one `ipc.rs` uses for requests - every other
+  method on that bridge is a strict request/response round trip that
+  discards anything else arriving mid-flight, so a push landing during an
+  unrelated GET would simply be lost on the shared connection.
+  - **Priming**: the first time a publisher is followed (or the app starts),
+    their existing posts are absorbed silently rather than announced -
+    otherwise following someone with forty old posts, or just restarting the
+    app, would fire forty toasts at once. Only a post that shows up *after*
+    priming is news.
+  - **Push + poll, one claim**: a live subscription push is what makes this
+    feel instant, but the real gateway network is documented throughout this
+    file as flaky, and a subscription is exactly the kind of thing it can
+    quietly drop. So `watcher.rs` also polls every followed publisher's index
+    every 3 minutes as a backstop. Both paths funnel through
+    `LocalStore::claim_post_notification` (new `notified_posts` table, an
+    atomic `INSERT OR IGNORE`), so the two can never double-toast one post.
+  - A pushed `ContentIndexState` gets exactly the same Ed25519 verification
+    as a fetched one (`contracts::decode_verified_content_index`, factored
+    out of `fetch_remote_posts` for this reason) - nothing about arriving
+    unsolicited makes a pushed state more trustworthy.
+- **Reaching the UI**: `ipc.rs` gained a real server-push channel over the
+  *same* IPC WebSocket every request/response already uses - a push carries
+  an `"event"` field and no `"id"`, which is how `app/src/lib/delegate.ts`
+  (a new `on(event, handler)` subscription API, plus its own reconnect loop
+  so a listening UI survives a delegate restart) tells it apart from a
+  reply. `app/src/lib/notifications.ts` turns a `new_post` event into a real
+  OS toast via a new `show_notification` Tauri command
+  (`app/src-tauri/src/main.rs`, `tauri-plugin-notification`) - a subscriber-
+  only post from someone else is still announced (the teaser is the point)
+  but says so, since it can't be opened yet (see the ECDH gap below).
+- **The app now lives in the system tray.** Notifications only matter if the
+  app can still be listening when its window isn't in front of you, so
+  closing the window now hides it to the tray (`tauri::tray`, `tray-icon`
+  Cargo feature) instead of quitting - "Quit Aetheria" in the tray menu (or
+  a left-click to reopen) is the one thing that actually exits, running the
+  exact same sidecar cleanup as before. Standard Slack/Discord-style
+  behavior, not a novel pattern.
+- **Two dev/test escape hatches**, same spirit and same "unset for any
+  normal run" rule as this file's existing ones: `AETHERIA_IPC_PORT`
+  (`delegate/src/main.rs`) runs a delegate's IPC listener on a port other
+  than 47021, and `AETHERIA_FREENET_WS_URL` (`freenet_bridge.rs`) points a
+  delegate at a Freenet node on a port other than 7509. Both exist because
+  verifying "your followers get notified" inherently needs *two* delegates
+  (and, for a truly isolated test, two nodes) running on one machine at
+  once, which the previously-hardcoded ports made impossible.
+- **Verified live, 2026-08-04**:
+  `delegate/src/new_post_notification_e2e_test.rs` (same shape and rigor as
+  `follow_publisher_e2e_test.rs` - two genuinely independent identities,
+  `#[ignore]`d, needs a live node, run with `cargo test
+  new_post_notification_e2e -- --ignored --nocapture`) mints an independent
+  publisher identity, publishes a backlog post, has a real `ipc::serve`
+  reader instance (driven over a real WebSocket, not by calling handlers
+  directly) follow them, then publishes a brand-new post and waits for it to
+  arrive as an unprompted push over the real IPC socket. Passed with the
+  push arriving **0.0s** after publishing (the real subscription firing, not
+  the 3-minute poll fallback), correctly skipped the pre-follow backlog post,
+  and carried the correct title/author/pubkey/locked flag. All 16 non-
+  network unit tests pass, `tsc` is clean, and a full `npm run build:desktop`
+  (including the new tray-icon and notification-plugin dependencies)
+  succeeds with no warnings and produces both installers. The
+  frontend-to-toast link itself (clicking through an actual installed,
+  packaged build and confirming a real Windows toast appears) has **not**
+  been independently re-driven end-to-end - noted here rather than claimed,
+  since that specific link needs a real desktop session to observe and is
+  the one piece of this feature a live subscription-network test can't
+  reach.
+
 ## Known stub / unimplemented areas
 
-- `FreenetBridge::subscribe` — sends nothing, still `todo!()`
-  (`// TODO(Phase 4)`); nothing in the delegate consumes the
-  `UpdateNotification` push responses a real subscription would trigger
-  (pinning daemon / live feed updates, design doc §7-8), so wiring the send
-  half up now would be a silent no-op.
 - Per-post subscription tier is hardcoded to `required_tier_id: 0`
   (`ipc.rs`'s `handle_publish_post`) — the UI doesn't expose multiple tiers
   yet, and neither does the fresh `PublisherProfile` the delegate publishes
