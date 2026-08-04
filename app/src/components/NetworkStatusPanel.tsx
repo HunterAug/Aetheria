@@ -43,8 +43,8 @@ function describe(
         dot: "bg-emerald-500",
         label:
           status.peer_count === 1
-            ? "Connected — 1 peer"
-            : `Connected — ${status.peer_count} peers`,
+            ? "Connected (1 peer)"
+            : `Connected (${status.peer_count} peers)`,
         detail: null,
       };
     case "isolated":
@@ -52,7 +52,7 @@ function describe(
         dot: "bg-amber-500",
         label: "No peer connections",
         detail:
-          "Your Freenet node is running but isn't connected to anyone, so feeds will look empty and posts won't publish. A VPN or a restrictive firewall is the most common cause — both can block the NAT hole-punching Freenet needs. It can also just take a minute or two on a cold start.",
+          "Your Freenet node is running but isn't connected to anyone, so feeds will look empty and posts won't publish. A VPN or a restrictive firewall is the most common cause; both can block the NAT hole-punching Freenet needs. It can also just take a minute or two on a cold start.",
       };
     case "unknown":
       return {
@@ -117,7 +117,7 @@ export default function NetworkStatusPanel() {
   // folded into the headline state.
   const opsWarning =
     !unreachable && status?.state === "connected" && status.last_error
-      ? "Recent network operations are failing — the public gateways can be flaky; retrying usually works."
+      ? "Recent network operations are failing. The public gateways can be flaky; retrying usually works."
       : null;
 
   return (
