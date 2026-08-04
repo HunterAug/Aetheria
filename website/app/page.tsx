@@ -3,8 +3,12 @@ import { isReleased } from "@/lib/config";
 
 const FEATURES = [
   {
-    title: "Nobody can take your posts down",
-    body: "Your writing is stored on Freenet, a peer-to-peer network with no central server. There's no company account to suspend, no platform to pressure, and no single computer to unplug.",
+    title: "Once they have it, it's theirs to keep",
+    body: "Freenet delivers your posts straight to your readers, no server in between. Once someone receives a post, it's saved on their own device — readable offline, permanently. No update, algorithm change, or shutdown can reach into their library and take it back.",
+  },
+  {
+    title: "No account for anyone to suspend",
+    body: "Your writing lives on Freenet, a peer-to-peer network with no central server. There's no company account to suspend and no single computer to unplug to make your publication disappear — whether the reason is a policy dispute or something more serious.",
   },
   {
     title: "You hold the keys",
@@ -14,10 +18,6 @@ const FEATURES = [
     title: "Direct, non-custodial payments",
     body: "Subscriptions are paid wallet-to-wallet over the Lightning Network (via Nostr Wallet Connect). Money goes straight from a reader to a publisher, and no platform ever touches it.",
   },
-  {
-    title: "Free and open source",
-    body: "Aetheria isn't a company or a product with a business model built on your data. The code is public, the protocol is documented, and anyone can run it.",
-  },
 ];
 
 export default async function Home() {
@@ -26,15 +26,18 @@ export default async function Home() {
     <div>
       <section className="max-w-5xl mx-auto px-6 pt-20 pb-16 text-center">
         <h1 className="text-4xl sm:text-5xl font-bold tracking-tight text-neutral-50">
-          Publishing that can't be
+          Your readers. Your archive.
           <br />
-          <span className="aetheria-gradient-text">switched off</span>
+          <span className="aetheria-gradient-text">Nobody else's call.</span>
         </h1>
         <p className="mt-6 text-lg text-neutral-400 max-w-2xl mx-auto leading-relaxed">
-          Aetheria is a decentralized, serverless replacement for Substack or
-          Medium. Your posts live on the Freenet peer-to-peer network instead
-          of one company's servers. Nobody can deplatform you, and nobody
-          stands between you and your readers.
+          Substack can change its rules. Medium can reshuffle its paywall.
+          Any platform can suspend an account over a policy dispute — nothing
+          illegal required — and take your archive and your readers with it.
+          Aetheria puts no company in the middle: your posts reach the people
+          who follow you directly over Freenet, a peer-to-peer network, and
+          once a reader has one, it's saved on their device for good. No
+          policy change can undeliver it.
         </p>
         <div className="mt-8 flex items-center justify-center gap-4">
           {released ? (

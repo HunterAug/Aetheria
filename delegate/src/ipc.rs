@@ -45,6 +45,7 @@ use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -1201,11 +1202,45 @@ fn feed_item_json(
     })
 }
 
-/// Every followed publisher's posts, fetched live from the network -
-/// best-effort per publisher: a fetch failure for one followed publisher
-/// (the real gateway network is known to be flaky, see CLAUDE.md) is logged
-/// and that publisher is skipped for this refresh, not treated as a reason
-/// to fail the whole feed for every other publisher.
+/// Renders a durably-cached post header (`db::CachedRemotePost`) in the same
+/// shape `feed_item_json` produces for a live one - the two are
+/// interchangeable to the UI by design, since the whole point of the cache
+/// is that "seen once" and "seen just now" should look identical once
+/// something's in a feed.
+fn cached_post_feed_item(row: &crate::db::CachedRemotePost, is_own: bool) -> serde_json::Value {
+    let locked = row.access_level == "subscriber" && !is_own;
+    serde_json::json!({
+        "post_id": hex::encode(row.post_id),
+        "title": row.title,
+        "summary": row.summary,
+        "access_level": row.access_level,
+        "epoch_id": row.epoch_id,
+        "published_at": row.published_at,
+        "author_pubkey": hex::encode(row.author_pubkey),
+        "author_display_name": row.author_display_name,
+        "is_own": is_own,
+        "locked": locked,
+        "post_contract_id": row.post_contract_id,
+    })
+}
+
+fn access_level_str(access_level: &aetheria_types::AccessTier) -> &'static str {
+    match access_level {
+        aetheria_types::AccessTier::Public => "public",
+        aetheria_types::AccessTier::SubscriberOnly { .. } => "subscriber",
+    }
+}
+
+/// Every followed publisher's posts - a live fetch merged with the durable
+/// local cache (see `db.rs`'s module docs on `cached_remote_posts`), so a
+/// publisher's older posts don't vanish from Home just because this
+/// refresh's live fetch failed or the network's current copy of their index
+/// happens to be thinner than what's actually been seen before. Best-effort
+/// per publisher on the live half: a fetch failure for one followed
+/// publisher (the real gateway network is known to be flaky, see CLAUDE.md)
+/// is logged and that publisher's live fetch is skipped for this refresh,
+/// not treated as a reason to fail the whole feed for every other publisher
+/// - their cached posts still appear via the merge below regardless.
 async fn followed_feed_items(delegate: &Delegate) -> Vec<serde_json::Value> {
     let followed = match delegate.db.list_followed_publishers() {
         Ok(rows) => rows,
@@ -1215,11 +1250,31 @@ async fn followed_feed_items(delegate: &Delegate) -> Vec<serde_json::Value> {
         }
     };
 
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let mut items = Vec::new();
-    for f in followed {
+    let mut seen = HashSet::new();
+    for f in &followed {
         match contracts::fetch_remote_posts(&delegate.unlocked().freenet, f.author_pubkey).await {
             Ok(posts) => {
                 for header in posts {
+                    if let Err(e) = delegate.db.cache_remote_post(
+                        &header.post_id,
+                        &f.author_pubkey,
+                        &f.display_name,
+                        &header.title,
+                        &header.summary,
+                        &header.post_contract_id,
+                        access_level_str(&header.access_level),
+                        header.epoch_id,
+                        header.published_at,
+                        now,
+                    ) {
+                        tracing::warn!(error = %e, "caching a followed publisher's post failed");
+                    }
+                    seen.insert(header.post_contract_id.clone());
                     items.push(feed_item_json(
                         header.post_id,
                         &header.title,
@@ -1238,9 +1293,27 @@ async fn followed_feed_items(delegate: &Delegate) -> Vec<serde_json::Value> {
                 tracing::warn!(
                     author_pubkey = %hex::encode(f.author_pubkey),
                     error = %e,
-                    "fetching a followed publisher's posts failed - skipping them this refresh"
+                    "fetching a followed publisher's posts failed - falling back to their cached posts"
                 );
             }
+        }
+    }
+
+    for f in &followed {
+        match delegate.db.list_cached_remote_posts_by_author(&f.author_pubkey) {
+            Ok(cached) => {
+                for row in cached {
+                    if seen.contains(&row.post_contract_id) {
+                        continue;
+                    }
+                    items.push(cached_post_feed_item(&row, false));
+                }
+            }
+            Err(e) => tracing::warn!(
+                author_pubkey = %hex::encode(f.author_pubkey),
+                error = %e,
+                "reading cached posts for a followed publisher failed"
+            ),
         }
     }
     items
@@ -1262,30 +1335,79 @@ async fn handle_get_following_feed(delegate: &Delegate) -> Result<serde_json::Va
 
 /// Backs the Latest tab: the most recent posts from *every* publisher on
 /// the network, via the shared `GlobalDirectoryContract` - see
-/// `contracts::fetch_global_directory`'s module docs. Own posts appear here
-/// too (unlocked, `is_own: true`) exactly like anyone else's - this is a
-/// single global feed, not "everyone but me".
+/// `contracts::fetch_global_directory`'s module docs - merged with every
+/// post this delegate has ever durably cached (`db.rs`'s `cached_remote_posts`
+/// table). Own posts appear here too (unlocked, `is_own: true`) exactly like
+/// anyone else's - this is a single global feed, not "everyone but me".
+///
+/// A live fetch failure (or the network's current copy of the shared
+/// directory simply not including something it once did - this network is
+/// sparse enough that content availability isn't guaranteed, see CLAUDE.md)
+/// never empties this feed: it's logged and the durable cache is served on
+/// its own, rather than propagating the error and showing nothing.
 async fn handle_get_latest_feed(delegate: &Delegate) -> Result<serde_json::Value> {
     let self_pubkey = delegate.unlocked().keys.master_signing_verifying_bytes();
-    let entries = contracts::fetch_global_directory(&delegate.unlocked().freenet).await?;
-    let mut items: Vec<_> = entries
-        .into_iter()
-        .map(|e| {
-            let is_own = e.author_pubkey == self_pubkey;
-            feed_item_json(
-                e.post_id,
-                &e.title,
-                &e.summary,
-                &e.access_level,
-                e.epoch_id,
-                e.published_at,
-                e.author_pubkey,
-                &e.author_display_name,
-                is_own,
-                Some(e.post_contract_id),
-            )
-        })
-        .collect();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let mut items = Vec::new();
+    let mut seen = HashSet::new();
+    match contracts::fetch_global_directory(&delegate.unlocked().freenet).await {
+        Ok(entries) => {
+            for e in entries {
+                if let Err(err) = delegate.db.cache_remote_post(
+                    &e.post_id,
+                    &e.author_pubkey,
+                    &e.author_display_name,
+                    &e.title,
+                    &e.summary,
+                    &e.post_contract_id,
+                    access_level_str(&e.access_level),
+                    e.epoch_id,
+                    e.published_at,
+                    now,
+                ) {
+                    tracing::warn!(error = %err, "caching a global directory entry failed");
+                }
+                seen.insert(e.post_contract_id.clone());
+                let is_own = e.author_pubkey == self_pubkey;
+                items.push(feed_item_json(
+                    e.post_id,
+                    &e.title,
+                    &e.summary,
+                    &e.access_level,
+                    e.epoch_id,
+                    e.published_at,
+                    e.author_pubkey,
+                    &e.author_display_name,
+                    is_own,
+                    Some(e.post_contract_id),
+                ));
+            }
+        }
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "fetching the global directory failed - falling back to cached posts"
+            );
+        }
+    }
+
+    match delegate.db.list_cached_remote_posts() {
+        Ok(cached) => {
+            for row in cached {
+                if seen.contains(&row.post_contract_id) {
+                    continue;
+                }
+                let is_own = row.author_pubkey == self_pubkey;
+                items.push(cached_post_feed_item(&row, is_own));
+            }
+        }
+        Err(err) => tracing::warn!(error = %err, "reading cached posts for the Latest feed failed"),
+    }
+
     // The contract's own merge already sorts newest-first, but the network
     // may have returned a stale/partial copy - re-sort defensively rather
     // than trust that invariant blindly.
@@ -1298,6 +1420,12 @@ async fn handle_get_latest_feed(delegate: &Delegate) -> Result<serde_json::Value
 /// *verifies* their real `PublisherProfileContract` (see
 /// `contracts::fetch_remote_profile`'s module docs) rather than trusting
 /// anything client-supplied, plus their recent posts for display.
+///
+/// A live fetch failure falls back to the durably-cached copy of this
+/// profile (`db.rs`'s `cached_remote_profiles`) if one exists - only a
+/// pubkey this delegate has *never* successfully seen a verified profile for
+/// actually errors out. Posts follow the same live-plus-cache merge as
+/// `handle_get_latest_feed`.
 async fn handle_get_publisher_profile(
     delegate: &Delegate,
     author_pubkey_hex: &str,
@@ -1305,15 +1433,42 @@ async fn handle_get_publisher_profile(
     let author_pubkey: [u8; 32] = hex::decode_array(author_pubkey_hex)?;
     let self_pubkey = delegate.unlocked().keys.master_signing_verifying_bytes();
     let is_own = author_pubkey == self_pubkey;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
 
-    let profile = contracts::fetch_remote_profile(&delegate.unlocked().freenet, author_pubkey)
-        .await
-        .context("looking up that publisher's profile on the network")?
-        .ok_or_else(|| anyhow::anyhow!("no publisher profile found for that pubkey"))?;
-    let display_name = if profile.display_name.trim().is_empty() {
+    let live_profile = match contracts::fetch_remote_profile(&delegate.unlocked().freenet, author_pubkey).await {
+        Ok(profile) => profile,
+        Err(e) => {
+            tracing::warn!(error = %e, "fetching remote profile failed - falling back to cache if available");
+            None
+        }
+    };
+    let (display_name, bio, avatar_freenet_key) = if let Some(profile) = &live_profile {
+        if let Err(e) = delegate.db.cache_remote_profile(
+            &author_pubkey,
+            &profile.display_name,
+            &profile.bio,
+            profile.avatar_freenet_key.as_deref(),
+            now,
+        ) {
+            tracing::warn!(error = %e, "caching remote profile failed");
+        }
+        (
+            profile.display_name.clone(),
+            profile.bio.clone(),
+            profile.avatar_freenet_key.clone(),
+        )
+    } else if let Some(cached) = delegate.db.get_cached_remote_profile(&author_pubkey)? {
+        (cached.display_name, cached.bio, cached.avatar_freenet_key)
+    } else {
+        anyhow::bail!("no publisher profile found for that pubkey");
+    };
+    let display_name = if display_name.trim().is_empty() {
         "Untitled Publication".to_string()
     } else {
-        profile.display_name.clone()
+        display_name
     };
     let is_following = delegate
         .db
@@ -1321,33 +1476,62 @@ async fn handle_get_publisher_profile(
         .iter()
         .any(|f| f.author_pubkey == author_pubkey);
 
-    let posts = contracts::fetch_remote_posts(&delegate.unlocked().freenet, author_pubkey)
-        .await
-        .unwrap_or_default();
-    let mut post_items: Vec<_> = posts
-        .into_iter()
-        .map(|header| {
-            feed_item_json(
-                header.post_id,
-                &header.title,
-                &header.summary,
-                &header.access_level,
-                header.epoch_id,
-                header.published_at,
-                author_pubkey,
-                &display_name,
-                is_own,
-                Some(header.post_contract_id),
-            )
-        })
-        .collect();
+    let mut post_items = Vec::new();
+    let mut seen = HashSet::new();
+    match contracts::fetch_remote_posts(&delegate.unlocked().freenet, author_pubkey).await {
+        Ok(posts) => {
+            for header in posts {
+                if let Err(e) = delegate.db.cache_remote_post(
+                    &header.post_id,
+                    &author_pubkey,
+                    &display_name,
+                    &header.title,
+                    &header.summary,
+                    &header.post_contract_id,
+                    access_level_str(&header.access_level),
+                    header.epoch_id,
+                    header.published_at,
+                    now,
+                ) {
+                    tracing::warn!(error = %e, "caching a publisher's post failed");
+                }
+                seen.insert(header.post_contract_id.clone());
+                post_items.push(feed_item_json(
+                    header.post_id,
+                    &header.title,
+                    &header.summary,
+                    &header.access_level,
+                    header.epoch_id,
+                    header.published_at,
+                    author_pubkey,
+                    &display_name,
+                    is_own,
+                    Some(header.post_contract_id),
+                ));
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "fetching this publisher's posts failed - falling back to cache");
+        }
+    }
+    match delegate.db.list_cached_remote_posts_by_author(&author_pubkey) {
+        Ok(cached) => {
+            for row in cached {
+                if seen.contains(&row.post_contract_id) {
+                    continue;
+                }
+                post_items.push(cached_post_feed_item(&row, is_own));
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "reading cached posts for a publisher's profile failed"),
+    }
     sort_feed_items_desc(&mut post_items);
 
     Ok(serde_json::json!({
         "author_pubkey": author_pubkey_hex,
         "display_name": display_name,
-        "bio": profile.bio,
-        "avatar_freenet_key": profile.avatar_freenet_key,
+        "bio": bio,
+        "avatar_freenet_key": avatar_freenet_key,
         "is_own": is_own,
         "is_following": is_following,
         "posts": post_items,
@@ -1361,23 +1545,50 @@ async fn handle_get_publisher_profile(
 /// a `SubscriberOnly` payload's nonce is genuine random AES-256-GCM output,
 /// never all-zero (see `publish_post_to_network`'s convention), so this is a
 /// real distinguishing check, not a formality.
+///
+/// Once a post's plaintext markdown has been recovered here, it's cached
+/// durably (`db.rs`'s `cached_post_payloads`) - the whole point of this
+/// feature (see CLAUDE.md's positioning notes): once you've actually opened
+/// something, it's yours to keep reading regardless of whether the network
+/// can still produce it later. A live fetch failure falls back to that
+/// cached copy rather than erroring if one exists.
 async fn handle_get_remote_post(
     delegate: &Delegate,
     post_contract_id: &str,
 ) -> Result<serde_json::Value> {
-    let payload = contracts::fetch_remote_post_payload(&delegate.unlocked().freenet, post_contract_id).await?;
-    anyhow::ensure!(
-        payload.nonce == [0u8; 12],
-        "this post is subscriber-only content from another publisher and can't be opened yet - \
-         there's no mechanism yet for a reader to learn a stranger's ECDH key (see CLAUDE.md's \
-         Known stub section)"
-    );
-    let markdown = String::from_utf8(payload.cipher_text)
-        .context("decoding remote public post payload as UTF-8 markdown")?;
-    Ok(serde_json::json!({
-        "post_contract_id": post_contract_id,
-        "markdown": markdown,
-    }))
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    match contracts::fetch_remote_post_payload(&delegate.unlocked().freenet, post_contract_id).await {
+        Ok(payload) => {
+            anyhow::ensure!(
+                payload.nonce == [0u8; 12],
+                "this post is subscriber-only content from another publisher and can't be opened yet - \
+                 there's no mechanism yet for a reader to learn a stranger's ECDH key (see CLAUDE.md's \
+                 Known stub section)"
+            );
+            let markdown = String::from_utf8(payload.cipher_text)
+                .context("decoding remote public post payload as UTF-8 markdown")?;
+            if let Err(e) = delegate.db.cache_post_payload(post_contract_id, &markdown, now) {
+                tracing::warn!(error = %e, "caching a remote post's content failed");
+            }
+            Ok(serde_json::json!({
+                "post_contract_id": post_contract_id,
+                "markdown": markdown,
+            }))
+        }
+        Err(e) => {
+            if let Some(markdown) = delegate.db.get_cached_post_payload(post_contract_id)? {
+                tracing::warn!(error = %e, "fetching remote post live failed - serving cached copy");
+                return Ok(serde_json::json!({
+                    "post_contract_id": post_contract_id,
+                    "markdown": markdown,
+                }));
+            }
+            Err(e)
+        }
+    }
 }
 
 /// Minimal data-URL codec (`data:<mime>;base64,<payload>`) for the profile

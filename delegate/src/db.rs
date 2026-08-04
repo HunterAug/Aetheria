@@ -75,6 +75,35 @@ pub struct SubscriberRow {
     pub issued_at: u64,
 }
 
+/// One publisher's profile as last successfully fetched from the network -
+/// see the "cached_remote_*" tables' module docs below for why this exists
+/// alongside the live `contracts::fetch_remote_profile` call.
+pub struct CachedRemoteProfile {
+    pub display_name: String,
+    pub bio: String,
+    pub avatar_freenet_key: Option<String>,
+}
+
+/// One post as last successfully fetched from a publisher's `ContentIndexContract`
+/// (`contracts::fetch_remote_posts`) or the shared `GlobalDirectoryContract`
+/// (`contracts::fetch_global_directory`) - the same shape serves both since
+/// `ipc.rs::feed_item_json` renders them identically either way.
+pub struct CachedRemotePost {
+    pub post_id: [u8; 16],
+    pub author_pubkey: [u8; 32],
+    pub author_display_name: String,
+    pub title: String,
+    pub summary: String,
+    pub post_contract_id: String,
+    /// `"public"` or `"subscriber"` - mirrors `feed_item_json`'s flattening
+    /// of `AccessTier` rather than storing the enum's own serde shape, so
+    /// reconstructing a feed item back out doesn't need this module to know
+    /// `aetheria_types::AccessTier` at all.
+    pub access_level: String,
+    pub epoch_id: u32,
+    pub published_at: u64,
+}
+
 /// A publisher this delegate has chosen to follow (see `contracts::fetch_remote_profile`
 /// for how `display_name`/`avatar_freenet_key` were validated at follow time).
 /// Cached locally so the Following tab and the merged Home feed render fast
@@ -142,6 +171,47 @@ impl LocalStore {
                 display_name       TEXT NOT NULL,
                 avatar_freenet_key TEXT,
                 followed_at        INTEGER NOT NULL
+            );
+
+            -- Durable local archive of everything this delegate has ever
+            -- successfully fetched from the network: other publishers'
+            -- profiles, their post headers (whether discovered via a
+            -- followed publisher's own index or via the network-wide
+            -- GlobalDirectoryContract), and the actual content of any post
+            -- once opened. The real Freenet network only keeps a contract's
+            -- state reachable for as long as some peer bothers to host it -
+            -- these tables are what make "you saw it once" mean "you have it
+            -- forever," independent of whether the network can still
+            -- produce it on a later live fetch. Every write here is a
+            -- same-key upsert (never deleted automatically) and every read
+            -- is additive to whatever the live network returns this time -
+            -- see `ipc.rs`'s feed handlers for how live results and this
+            -- cache are merged.
+            CREATE TABLE IF NOT EXISTS cached_remote_profiles (
+                author_pubkey      BLOB PRIMARY KEY,
+                display_name       TEXT NOT NULL,
+                bio                TEXT NOT NULL,
+                avatar_freenet_key TEXT,
+                cached_at          INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS cached_remote_posts (
+                post_contract_id     TEXT PRIMARY KEY,
+                post_id              BLOB NOT NULL,
+                author_pubkey        BLOB NOT NULL,
+                author_display_name  TEXT NOT NULL,
+                title                TEXT NOT NULL,
+                summary              TEXT NOT NULL,
+                access_level         TEXT NOT NULL,
+                epoch_id             INTEGER NOT NULL,
+                published_at         INTEGER NOT NULL,
+                cached_at            INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS cached_post_payloads (
+                post_contract_id TEXT PRIMARY KEY,
+                markdown         TEXT NOT NULL,
+                cached_at        INTEGER NOT NULL
             );
             "#,
         )?;
@@ -473,6 +543,194 @@ impl LocalStore {
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
     }
 
+    /// Upserts one publisher's profile into the durable local cache - called
+    /// after any successful `contracts::fetch_remote_profile`, regardless of
+    /// whether the caller is following them (a one-off profile visit is
+    /// worth remembering too, not just followed publishers).
+    pub fn cache_remote_profile(
+        &self,
+        author_pubkey: &[u8; 32],
+        display_name: &str,
+        bio: &str,
+        avatar_freenet_key: Option<&str>,
+        cached_at: u64,
+    ) -> Result<()> {
+        self.conn.lock().expect("db mutex poisoned").execute(
+            "INSERT INTO cached_remote_profiles (author_pubkey, display_name, bio, avatar_freenet_key, cached_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(author_pubkey) DO UPDATE SET
+                display_name = excluded.display_name,
+                bio = excluded.bio,
+                avatar_freenet_key = excluded.avatar_freenet_key,
+                cached_at = excluded.cached_at",
+            params![
+                author_pubkey.as_slice(),
+                display_name,
+                bio,
+                avatar_freenet_key,
+                cached_at as i64
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The last successfully-cached copy of `author_pubkey`'s profile, or
+    /// `None` if it's never been fetched successfully - the fallback
+    /// `handle_get_publisher_profile` reaches for when a live fetch fails.
+    pub fn get_cached_remote_profile(
+        &self,
+        author_pubkey: &[u8; 32],
+    ) -> Result<Option<CachedRemoteProfile>> {
+        self.conn
+            .lock()
+            .expect("db mutex poisoned")
+            .query_row(
+                "SELECT display_name, bio, avatar_freenet_key FROM cached_remote_profiles WHERE author_pubkey = ?1",
+                params![author_pubkey.as_slice()],
+                |row| {
+                    Ok(CachedRemoteProfile {
+                        display_name: row.get(0)?,
+                        bio: row.get(1)?,
+                        avatar_freenet_key: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Upserts one post header into the durable local cache, keyed by its
+    /// globally-unique `post_contract_id` - the same table backs both a
+    /// followed publisher's own index (`contracts::fetch_remote_posts`) and
+    /// the network-wide directory (`contracts::fetch_global_directory`),
+    /// since both are just "a post header, discovered a different way."
+    #[allow(clippy::too_many_arguments)]
+    pub fn cache_remote_post(
+        &self,
+        post_id: &[u8; 16],
+        author_pubkey: &[u8; 32],
+        author_display_name: &str,
+        title: &str,
+        summary: &str,
+        post_contract_id: &str,
+        access_level: &str,
+        epoch_id: u32,
+        published_at: u64,
+        cached_at: u64,
+    ) -> Result<()> {
+        self.conn.lock().expect("db mutex poisoned").execute(
+            "INSERT INTO cached_remote_posts
+                (post_contract_id, post_id, author_pubkey, author_display_name, title, summary, access_level, epoch_id, published_at, cached_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(post_contract_id) DO UPDATE SET
+                post_id = excluded.post_id,
+                author_pubkey = excluded.author_pubkey,
+                author_display_name = excluded.author_display_name,
+                title = excluded.title,
+                summary = excluded.summary,
+                access_level = excluded.access_level,
+                epoch_id = excluded.epoch_id,
+                published_at = excluded.published_at,
+                cached_at = excluded.cached_at",
+            params![
+                post_contract_id,
+                post_id.as_slice(),
+                author_pubkey.as_slice(),
+                author_display_name,
+                title,
+                summary,
+                access_level,
+                epoch_id,
+                published_at as i64,
+                cached_at as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Every cached post header from every publisher, most recent first -
+    /// backs the Latest tab's durable half of the merge in
+    /// `ipc.rs::handle_get_latest_feed`.
+    pub fn list_cached_remote_posts(&self) -> Result<Vec<CachedRemotePost>> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT post_id, author_pubkey, author_display_name, title, summary, post_contract_id, access_level, epoch_id, published_at
+             FROM cached_remote_posts ORDER BY published_at DESC",
+        )?;
+        let rows = stmt.query_map([], Self::row_to_cached_remote_post)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
+    /// Cached post headers from just one publisher, most recent first -
+    /// backs the Home tab's durable half of the merge in
+    /// `ipc.rs::followed_feed_items`.
+    pub fn list_cached_remote_posts_by_author(
+        &self,
+        author_pubkey: &[u8; 32],
+    ) -> Result<Vec<CachedRemotePost>> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT post_id, author_pubkey, author_display_name, title, summary, post_contract_id, access_level, epoch_id, published_at
+             FROM cached_remote_posts WHERE author_pubkey = ?1 ORDER BY published_at DESC",
+        )?;
+        let rows = stmt.query_map(params![author_pubkey.as_slice()], Self::row_to_cached_remote_post)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
+    fn row_to_cached_remote_post(row: &rusqlite::Row) -> rusqlite::Result<CachedRemotePost> {
+        let post_id: Vec<u8> = row.get(0)?;
+        let author_pubkey: Vec<u8> = row.get(1)?;
+        let epoch_id: i64 = row.get(7)?;
+        let published_at: i64 = row.get(8)?;
+        Ok(CachedRemotePost {
+            post_id: post_id.try_into().unwrap_or([0u8; 16]),
+            author_pubkey: author_pubkey.try_into().unwrap_or([0u8; 32]),
+            author_display_name: row.get(2)?,
+            title: row.get(3)?,
+            summary: row.get(4)?,
+            post_contract_id: row.get(5)?,
+            access_level: row.get(6)?,
+            epoch_id: epoch_id as u32,
+            published_at: published_at as u64,
+        })
+    }
+
+    /// Upserts the actual markdown content of a post once successfully
+    /// fetched (`contracts::fetch_remote_post_payload` plus the public-post
+    /// plaintext convention `handle_get_remote_post` already applies) - once
+    /// a reader has actually opened a post, its content stays theirs even if
+    /// the network can no longer produce it on a later visit.
+    pub fn cache_post_payload(
+        &self,
+        post_contract_id: &str,
+        markdown: &str,
+        cached_at: u64,
+    ) -> Result<()> {
+        self.conn.lock().expect("db mutex poisoned").execute(
+            "INSERT INTO cached_post_payloads (post_contract_id, markdown, cached_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(post_contract_id) DO UPDATE SET markdown = excluded.markdown, cached_at = excluded.cached_at",
+            params![post_contract_id, markdown, cached_at as i64],
+        )?;
+        Ok(())
+    }
+
+    /// The last successfully-cached copy of a remote post's markdown, or
+    /// `None` if it's never been opened successfully before -
+    /// `handle_get_remote_post`'s fallback when a live fetch fails.
+    pub fn get_cached_post_payload(&self, post_contract_id: &str) -> Result<Option<String>> {
+        self.conn
+            .lock()
+            .expect("db mutex poisoned")
+            .query_row(
+                "SELECT markdown FROM cached_post_payloads WHERE post_contract_id = ?1",
+                params![post_contract_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn get_epoch_key(&self, epoch_id: u32) -> Result<Option<[u8; 32]>> {
         self.conn
             .lock()
@@ -594,6 +852,129 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].display_name, "Updated Name");
         assert_eq!(rows[0].avatar_freenet_key.as_deref(), Some("key1"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cached_remote_profile_is_none_before_any_cache_then_round_trips() {
+        let (db, dir) = open_temp();
+        let pubkey = [3u8; 32];
+        assert!(db.get_cached_remote_profile(&pubkey).unwrap().is_none());
+
+        db.cache_remote_profile(&pubkey, "Some Writer", "Bio text", Some("avatar-key"), 100)
+            .unwrap();
+        let cached = db.get_cached_remote_profile(&pubkey).unwrap().unwrap();
+        assert_eq!(cached.display_name, "Some Writer");
+        assert_eq!(cached.bio, "Bio text");
+        assert_eq!(cached.avatar_freenet_key.as_deref(), Some("avatar-key"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cache_remote_profile_upserts_rather_than_duplicating() {
+        let (db, dir) = open_temp();
+        let pubkey = [4u8; 32];
+        db.cache_remote_profile(&pubkey, "First", "first bio", None, 1)
+            .unwrap();
+        db.cache_remote_profile(&pubkey, "Second", "second bio", Some("k"), 2)
+            .unwrap();
+
+        let cached = db.get_cached_remote_profile(&pubkey).unwrap().unwrap();
+        assert_eq!(cached.display_name, "Second");
+        assert_eq!(cached.bio, "second bio");
+        assert_eq!(cached.avatar_freenet_key.as_deref(), Some("k"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cached_remote_posts_round_trip_and_filter_by_author() {
+        let (db, dir) = open_temp();
+        let alice = [5u8; 32];
+        let bob = [6u8; 32];
+        db.cache_remote_post(
+            &[1u8; 16],
+            &alice,
+            "Alice",
+            "Alice's post",
+            "summary",
+            "contract-1",
+            "public",
+            0,
+            200,
+            1000,
+        )
+        .unwrap();
+        db.cache_remote_post(
+            &[2u8; 16],
+            &bob,
+            "Bob",
+            "Bob's post",
+            "summary",
+            "contract-2",
+            "subscriber",
+            0,
+            100,
+            1000,
+        )
+        .unwrap();
+
+        let all = db.list_cached_remote_posts().unwrap();
+        assert_eq!(all.len(), 2);
+        // Most recent (published_at) first.
+        assert_eq!(all[0].post_contract_id, "contract-1");
+        assert_eq!(all[1].post_contract_id, "contract-2");
+
+        let alice_only = db.list_cached_remote_posts_by_author(&alice).unwrap();
+        assert_eq!(alice_only.len(), 1);
+        assert_eq!(alice_only[0].post_contract_id, "contract-1");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cache_remote_post_upserts_by_post_contract_id() {
+        let (db, dir) = open_temp();
+        let author = [7u8; 32];
+        db.cache_remote_post(
+            &[1u8; 16], &author, "Author", "Old title", "old summary", "contract-x", "public", 0,
+            100, 1000,
+        )
+        .unwrap();
+        db.cache_remote_post(
+            &[1u8; 16], &author, "Author", "New title", "new summary", "contract-x", "public", 0,
+            100, 2000,
+        )
+        .unwrap();
+
+        let all = db.list_cached_remote_posts().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].title, "New title");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cached_post_payload_is_none_before_any_cache_then_round_trips() {
+        let (db, dir) = open_temp();
+        assert!(db.get_cached_post_payload("contract-y").unwrap().is_none());
+
+        db.cache_post_payload("contract-y", "# Hello world", 1000).unwrap();
+        assert_eq!(
+            db.get_cached_post_payload("contract-y").unwrap().as_deref(),
+            Some("# Hello world")
+        );
+
+        // Re-caching (e.g. re-opening the same post later) overwrites rather
+        // than erroring or duplicating.
+        db.cache_post_payload("contract-y", "# Updated content", 2000)
+            .unwrap();
+        assert_eq!(
+            db.get_cached_post_payload("contract-y").unwrap().as_deref(),
+            Some("# Updated content")
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

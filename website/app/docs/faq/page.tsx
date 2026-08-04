@@ -7,6 +7,10 @@ export const metadata: Metadata = {
 
 const QA = [
   {
+    q: "How is this different from Substack or Medium?",
+    a: "Those platforms work fine, until they don't: a Terms of Service update, an algorithm change, or an account suspension over a policy dispute — nothing illegal required — can cut you off from your archive and your readers with no appeal. Aetheria has no company running the platform at all, so there's no one positioned to do any of that. Once a reader has one of your posts, it's saved on their own device for good; no platform decision can reach back and take it away. Being hard to censor is part of that (there's no one to serve a takedown to), but it matters just as much for an ordinary newsletter writer who just doesn't want their work and their audience held hostage to a company's roadmap.",
+  },
+  {
     q: "What actually makes this “decentralized”?",
     a: "Your posts don't live on a server owned by a company called Aetheria. There isn't one. They're stored on Freenet, a peer-to-peer network where many independent computers each hold pieces of the network's data. There's no central database to seize, no company account to suspend, and no single point of failure.",
   },
@@ -16,7 +20,7 @@ const QA = [
   },
   {
     q: "Is my writing permanent forever?",
-    a: "Freenet keeps data that's actually being requested; content nobody looks at for a long time can fade from the network over time (the project's design plans a “pinning” feature to combat this, not yet built). In practice, anything with real readers stays alive.",
+    a: "Freenet keeps data that's actually being requested; content nobody looks at for a long time can fade from the network over time (the project's design plans a “pinning” feature to combat this, not yet built). In practice, anything with real readers stays alive. Separately, anything you've personally opened is saved on your own device the moment you read it — that copy is yours, readable offline, regardless of what later happens on the network.",
   },
   {
     q: "Who can read my subscriber-only posts?",

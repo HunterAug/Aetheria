@@ -14,9 +14,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Aetheria | Censorship-resistant publishing on Freenet",
+  title: "Aetheria | Publishing nobody else can revoke",
   description:
-    "Aetheria is a decentralized, serverless publishing platform. No company can take down your posts, suspend your account, or read your subscribers' payment details.",
+    "Aetheria is a decentralized publishing platform with no company standing between you and your readers. No policy change, algorithm shift, or account ban can undo what your readers already have — once they've received a post, it's permanently theirs to keep.",
 };
 
 const NAV = [
