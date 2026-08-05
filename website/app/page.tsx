@@ -3,20 +3,20 @@ import { isReleased } from "@/lib/config";
 
 const FEATURES = [
   {
+    title: "Discover writers you actually care about",
+    body: "Browse posts from everyone on the network or follow specific writers to curate your own feed. No algorithm decides what you see—you do. Follow anyone, unfollow instantly, and your feed updates in real-time.",
+  },
+  {
     title: "Once they have it, it's theirs to keep",
-    body: "Freenet delivers your posts straight to your readers, no server in between. Once someone receives a post, it's saved on their own device, readable offline, permanently. No update, algorithm change, or shutdown can reach into their library and take it back.",
+    body: "Posts are delivered directly to your readers over Freenet and saved on their devices. No algorithm can change what they see, no shutdown can delete their library, and no policy change can undeliver what's already in their hands.",
   },
   {
-    title: "No account for anyone to suspend",
-    body: "Your writing lives on Freenet, a peer-to-peer network with no central server. There's no company account to suspend and no single computer to unplug to make your publication disappear, whether the reason is a policy dispute or something more serious.",
+    title: "You hold the keys—literally",
+    body: "Your identity is an Ed25519 keypair on your machine, encrypted with a passphrase only you know. Every post is cryptographically signed, so readers can always verify it's really from you. No account to hack, no company holding your identity.",
   },
   {
-    title: "You hold the keys",
-    body: "Your identity is a cryptographic keypair on your own machine, protected by a passphrase only you know. Every post you publish is signed by it, so readers can always verify it's really from you.",
-  },
-  {
-    title: "Direct, non-custodial payments",
-    body: "Subscriptions are paid wallet-to-wallet over the Lightning Network (via Nostr Wallet Connect). Money goes straight from a reader to a publisher, and no platform ever touches it.",
+    title: "Direct payments, no middleman",
+    body: "Offer paid tiers. Readers subscribe directly with their Lightning wallet. Money goes straight to you—Aetheria never touches it, takes a cut, or sees who paid whom.",
   },
 ];
 
@@ -26,18 +26,12 @@ export default async function Home() {
     <div>
       <section className="max-w-5xl mx-auto px-6 pt-20 pb-16 text-center">
         <h1 className="text-4xl sm:text-5xl font-bold tracking-tight text-neutral-50">
-          Your readers. Your archive.
+          A social network you actually own.
           <br />
-          <span className="aetheria-gradient-text">Nobody else's call.</span>
+          <span className="aetheria-gradient-text">No company needed.</span>
         </h1>
         <p className="mt-6 text-lg text-neutral-400 max-w-2xl mx-auto leading-relaxed">
-          Substack can change its rules. Medium can reshuffle its paywall.
-          Any platform can suspend an account over a policy dispute (nothing
-          illegal required) and take your archive and your readers with it.
-          Aetheria puts no company in the middle: your posts reach the people
-          who follow you directly over Freenet, a peer-to-peer network, and
-          once a reader has one, it's saved on their device for good. No
-          policy change can undeliver it.
+          Read what others are writing. Follow the voices you trust. Build an audience that's truly yours. Aetheria is a decentralized social network that works without servers, algorithms, or platforms—just peer-to-peer connections between writers and readers. Your posts live on your readers' devices forever. Your audience is yours to keep. And no company can ever shut you down, change the rules, or take it away.
         </p>
         <div className="mt-8 flex items-center justify-center gap-4">
           {released ? (
@@ -80,19 +74,17 @@ export default async function Home() {
 
       <section className="max-w-5xl mx-auto px-6 py-16 text-center">
         <h2 className="text-2xl font-bold text-neutral-100">
-          See what people are actually publishing
+          Discover what's being written right now
         </h2>
         <p className="mt-3 text-neutral-400 max-w-xl mx-auto">
-          You don't need to install anything to look. Browse the most recent
-          posts published on the real Aetheria network, straight from this
-          page.
+          Browse the latest posts from across the Aetheria network. No installation needed—see the real community in action before you join.
         </p>
         <div className="mt-6">
           <Link
             href="/latest"
             className="inline-block rounded-lg border border-ink-700 text-sm font-semibold px-6 py-3 text-neutral-300 hover:bg-ink-900 transition"
           >
-            Browse latest posts →
+            Explore the network →
           </Link>
         </div>
       </section>
