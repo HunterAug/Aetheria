@@ -23,6 +23,14 @@ tauri-plugin-shell = "2"
 # `show_notification` command in main.rs, and no extra npm dependency or
 # capability grant is needed for a command this app defines itself.
 tauri-plugin-notification = "2"
+# Refuses a second `aetheria.exe` launch outright (focuses the existing
+# window instead) - found necessary once closing the window started hiding
+# to the tray rather than quitting (see main.rs): a user (or Windows, or a
+# stray shortcut) launching the app again while the first is still alive in
+# the tray used to spawn a *second* set of Freenet/delegate sidecars, both
+# pointing at the same shared Freenet data directory - a real, reproduced
+# "Database already open. Cannot acquire lock" failure between the two.
+tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

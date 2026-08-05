@@ -215,6 +215,79 @@ impl FreenetBridge {
         unreachable!("loop above always returns on its last iteration")
     }
 
+    /// Rebuilds this bridge's connection to the local node in place, used by
+    /// every method below whenever an attempt fails.
+    ///
+    /// Added after a real, reproduced bug: the bundled Freenet sidecar
+    /// auto-updates and restarts under a fresh OS process (see
+    /// `app/src-tauri/src/main.rs`'s supervisor), and until this method
+    /// existed, nothing rebuilt the delegate's own outstanding WebSocket to
+    /// the node that no longer exists - every operation on this bridge
+    /// failed identically and permanently afterward, with the network
+    /// status indicator stuck reporting "unknown" until the whole delegate
+    /// process was restarted (see CLAUDE.md's "Known gaps" note on that
+    /// feature, which flagged this exact gap before it was ever hit for
+    /// real). Best-effort: if nothing is listening at all right now, this
+    /// just logs and the caller's own retry loop backs off and tries again
+    /// on the next attempt, exactly as it already did before reconnecting
+    /// existed.
+    async fn reconnect(api: &mut WebApi) {
+        let url = node_ws_url();
+        match tokio_tungstenite::connect_async(&url).await {
+            Ok((stream, _)) => {
+                tracing::info!("rebuilt the Freenet node connection after it appeared to have died");
+                *api = WebApi::start(stream);
+            }
+            Err(e) => {
+                tracing::debug!(
+                    error = %e,
+                    "reconnect attempt failed - the caller's own retry backoff will try again"
+                );
+            }
+        }
+    }
+
+    /// One attempt at the node-diagnostics send+recv round trip, under
+    /// `query_node_status`'s own timeout - factored out so that function can
+    /// call it a second time after `reconnect` without duplicating the
+    /// send/recv logic.
+    async fn try_node_diagnostics(api: &mut WebApi) -> Result<freenet_stdlib::client_api::NodeDiagnosticsResponse> {
+        let request = ClientRequest::NodeQueries(NodeQuery::NodeDiagnostics {
+            // node_info + network_info only - no subscriptions, no contract
+            // states, no per-peer detail. Everything this needs, nothing that
+            // makes the node clone its full contract/subscription maps on a
+            // path that runs every few seconds.
+            config: NodeDiagnosticsConfig::basic_status(),
+        });
+        tokio::time::timeout(NODE_QUERY_TIMEOUT, async {
+            api.send(request)
+                .await
+                .map_err(|e| anyhow::anyhow!("sending node diagnostics query: {e}"))?;
+            loop {
+                match api.recv().await {
+                    Ok(HostResponse::QueryResponse(QueryResponse::NodeDiagnostics(report))) => {
+                        return Ok(report)
+                    }
+                    Ok(other) => {
+                        tracing::debug!(
+                            ?other,
+                            "ignoring unrelated host response while awaiting node diagnostics"
+                        );
+                        continue;
+                    }
+                    Err(e) => return Err(anyhow::anyhow!("node diagnostics query failed: {e}")),
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_elapsed| {
+            Err(anyhow::anyhow!(
+                "the local Freenet node did not answer a status query within {}s",
+                NODE_QUERY_TIMEOUT.as_secs()
+            ))
+        })
+    }
+
     /// Records that a contract operation completed a real round trip to the
     /// node, clearing any previously-recorded failure.
     fn record_success(&self) {
@@ -259,6 +332,14 @@ impl FreenetBridge {
     /// Never returns `Err`: the whole purpose is reporting how broken things
     /// currently are, so a failed query is data (`query_error`), not a reason
     /// to fail the caller.
+    ///
+    /// Still no *flakiness* retry loop (see above) - but it does attempt
+    /// exactly one reconnect-and-retry if the first attempt fails, since a
+    /// dead transport (the node process restarted, see `reconnect`'s docs)
+    /// is a different failure from gateway flakiness and would otherwise
+    /// leave this permanently reporting `unknown` after every restart of the
+    /// bundled sidecar - precisely the bug this second attempt exists to
+    /// close, found live on a real install.
     pub async fn query_node_status(&self) -> NodeStatus {
         let (last_success_secs_ago, last_error) = {
             let health = self.health.lock().expect("op-health mutex poisoned");
@@ -268,39 +349,15 @@ impl FreenetBridge {
             )
         };
 
-        let request = ClientRequest::NodeQueries(NodeQuery::NodeDiagnostics {
-            // node_info + network_info only - no subscriptions, no contract
-            // states, no per-peer detail. Everything this needs, nothing that
-            // makes the node clone its full contract/subscription maps on a
-            // path that runs every few seconds.
-            config: NodeDiagnosticsConfig::basic_status(),
-        });
-
         let mut api = self.api.lock().await;
-        let outcome = tokio::time::timeout(NODE_QUERY_TIMEOUT, async {
-            api.send(request)
-                .await
-                .map_err(|e| anyhow::anyhow!("sending node diagnostics query: {e}"))?;
-            loop {
-                match api.recv().await {
-                    Ok(HostResponse::QueryResponse(QueryResponse::NodeDiagnostics(report))) => {
-                        return Ok(report)
-                    }
-                    Ok(other) => {
-                        tracing::debug!(
-                            ?other,
-                            "ignoring unrelated host response while awaiting node diagnostics"
-                        );
-                        continue;
-                    }
-                    Err(e) => return Err(anyhow::anyhow!("node diagnostics query failed: {e}")),
-                }
-            }
-        })
-        .await;
+        let mut outcome = Self::try_node_diagnostics(&mut api).await;
+        if outcome.is_err() {
+            Self::reconnect(&mut api).await;
+            outcome = Self::try_node_diagnostics(&mut api).await;
+        }
 
         let (peer_count, node_peer_id, query_error) = match outcome {
-            Ok(Ok(report)) => (
+            Ok(report) => (
                 report
                     .network_info
                     .as_ref()
@@ -311,15 +368,7 @@ impl FreenetBridge {
                 // silently reporting as zero peers.
                 None,
             ),
-            Ok(Err(e)) => (None, None, Some(e.to_string())),
-            Err(_elapsed) => (
-                None,
-                None,
-                Some(format!(
-                    "the local Freenet node did not answer a status query within {}s",
-                    NODE_QUERY_TIMEOUT.as_secs()
-                )),
-            ),
+            Err(e) => (None, None, Some(e.to_string())),
         };
 
         NodeStatus {
@@ -347,6 +396,11 @@ impl FreenetBridge {
         params: Parameters<'static>,
         initial_state: Vec<u8>,
     ) -> Result<ContractKey> {
+        // Computed *before* `code`/`params` are consumed below, so the
+        // response can be checked against the key this call actually asked
+        // for - see the "ignoring ... for a different contract" checks in
+        // this method and its siblings for why that check exists at all.
+        let expected_key = ContractKey::from_params_and_code(&params, &*code);
         let contract = ContractContainer::Wasm(ContractWasmAPIVersion::V1(WrappedContract::new(
             code, params,
         )));
@@ -360,20 +414,54 @@ impl FreenetBridge {
         let mut api = self.api.lock().await;
 
         for attempt in 1..=MAX_ATTEMPTS {
-            api.send(request.clone())
+            // A `send` failure used to bail out of this whole method via `?`
+            // immediately, skipping the retry loop below entirely - which is
+            // exactly the case that matters most here, since a `send` on a
+            // dead connection (the node process restarted, see `reconnect`'s
+            // docs) fails immediately, every time, forever. Folding it into
+            // `outcome` alongside `recv` failures means it gets the same
+            // retry-with-reconnect treatment as everything else.
+            let send_result = api
+                .send(request.clone())
                 .await
-                .map_err(|e| anyhow::anyhow!("sending PUT request: {e}"))?;
+                .map_err(|e| anyhow::anyhow!("sending PUT request: {e}"));
 
-            let outcome = loop {
-                match api.recv().await {
-                    Ok(HostResponse::ContractResponse(ContractResponse::PutResponse { key })) => {
-                        break Ok(key)
+            let outcome: Result<ContractKey> = if let Err(e) = send_result {
+                Err(e)
+            } else {
+                loop {
+                    match api.recv().await {
+                        Ok(HostResponse::ContractResponse(ContractResponse::PutResponse {
+                            key,
+                        })) => {
+                            // Retries resend an identical PUT without
+                            // cancelling any earlier, still-outstanding
+                            // attempt, and this connection is shared across
+                            // every unrelated contract operation the
+                            // delegate makes - so a delayed PutResponse for
+                            // a *previous, different* put_new call can still
+                            // arrive here. Matching on response type alone
+                            // (as this used to) would accept it as this
+                            // call's answer and hand back the wrong contract
+                            // key. Only the type match is "unrelated host
+                            // response" territory; a same-type response for
+                            // a different key is just as unrelated.
+                            if key != expected_key {
+                                tracing::debug!(
+                                    expected = %expected_key.id(),
+                                    got = %key.id(),
+                                    "ignoring PutResponse for a different contract while awaiting PUT"
+                                );
+                                continue;
+                            }
+                            break Ok(key);
+                        }
+                        Ok(other) => {
+                            tracing::debug!(?other, "ignoring unrelated host response while awaiting PUT");
+                            continue;
+                        }
+                        Err(e) => break Err(anyhow::anyhow!("PUT failed: {e}")),
                     }
-                    Ok(other) => {
-                        tracing::debug!(?other, "ignoring unrelated host response while awaiting PUT");
-                        continue;
-                    }
-                    Err(e) => break Err(anyhow::anyhow!("PUT failed: {e}")),
                 }
             };
 
@@ -384,6 +472,7 @@ impl FreenetBridge {
                 }
                 Err(e) if attempt < MAX_ATTEMPTS => {
                     tracing::warn!(attempt, error = %e, "PUT failed, retrying");
+                    Self::reconnect(&mut api).await;
                     tokio::time::sleep(RETRY_DELAY).await;
                 }
                 Err(e) => {
@@ -412,23 +501,45 @@ impl FreenetBridge {
         let mut api = self.api.lock().await;
 
         for attempt in 1..=MAX_ATTEMPTS {
-            api.send(request.clone())
+            let send_result = api
+                .send(request.clone())
                 .await
-                .map_err(|e| anyhow::anyhow!("sending UPDATE request: {e}"))?;
+                .map_err(|e| anyhow::anyhow!("sending UPDATE request: {e}"));
 
-            let outcome = loop {
-                match api.recv().await {
-                    Ok(HostResponse::ContractResponse(ContractResponse::UpdateResponse {
-                        ..
-                    })) => break Ok(()),
-                    Ok(other) => {
-                        tracing::debug!(
-                            ?other,
-                            "ignoring unrelated host response while awaiting UPDATE"
-                        );
-                        continue;
+            let outcome: Result<()> = if let Err(e) = send_result {
+                Err(e)
+            } else {
+                loop {
+                    match api.recv().await {
+                        Ok(HostResponse::ContractResponse(ContractResponse::UpdateResponse {
+                            key: response_key,
+                            ..
+                        })) => {
+                            // Same reasoning as `put_new`'s check above: a
+                            // retried UPDATE can leave an earlier attempt's
+                            // response still in flight, and this connection is
+                            // shared with every other contract operation, so an
+                            // UpdateResponse arriving here isn't guaranteed to be
+                            // for *this* key.
+                            if response_key != key {
+                                tracing::debug!(
+                                    expected = %key.id(),
+                                    got = %response_key.id(),
+                                    "ignoring UpdateResponse for a different contract while awaiting UPDATE"
+                                );
+                                continue;
+                            }
+                            break Ok(());
+                        }
+                        Ok(other) => {
+                            tracing::debug!(
+                                ?other,
+                                "ignoring unrelated host response while awaiting UPDATE"
+                            );
+                            continue;
+                        }
+                        Err(e) => break Err(anyhow::anyhow!("UPDATE failed: {e}")),
                     }
-                    Err(e) => break Err(anyhow::anyhow!("UPDATE failed: {e}")),
                 }
             };
 
@@ -439,6 +550,7 @@ impl FreenetBridge {
                 }
                 Err(e) if attempt < MAX_ATTEMPTS => {
                     tracing::warn!(attempt, error = %e, "UPDATE failed, retrying");
+                    Self::reconnect(&mut api).await;
                     tokio::time::sleep(RETRY_DELAY).await;
                 }
                 Err(e) => {
@@ -464,27 +576,68 @@ impl FreenetBridge {
         let mut api = self.api.lock().await;
 
         for attempt in 1..=MAX_ATTEMPTS {
-            api.send(request.clone())
+            let send_result = api
+                .send(request.clone())
                 .await
-                .map_err(|e| anyhow::anyhow!("sending GET request: {e}"))?;
+                .map_err(|e| anyhow::anyhow!("sending GET request: {e}"));
 
-            let outcome = loop {
-                match api.recv().await {
-                    Ok(HostResponse::ContractResponse(ContractResponse::GetResponse {
-                        state,
-                        ..
-                    })) => break Ok(Some(state.as_ref().to_vec())),
-                    Ok(HostResponse::ContractResponse(ContractResponse::NotFound { .. })) => {
-                        break Ok(None)
+            let outcome: Result<Option<Vec<u8>>> = if let Err(e) = send_result {
+                Err(e)
+            } else {
+                loop {
+                    match api.recv().await {
+                        Ok(HostResponse::ContractResponse(ContractResponse::GetResponse {
+                            key: response_key,
+                            state,
+                            ..
+                        })) => {
+                            // This is the check whose absence caused "clicking a
+                            // publisher's name shows a different publisher's
+                            // profile": this connection is shared across every
+                            // contract operation the delegate makes, and a
+                            // retried GET resends an identical request without
+                            // cancelling any earlier, still-outstanding one - so
+                            // a delayed GetResponse for a *previous, unrelated*
+                            // get_state call (e.g. someone else's profile fetched
+                            // moments earlier) can still be sitting on this
+                            // connection when a later, different get_state call
+                            // starts waiting. Matching on response type alone (as
+                            // this used to) would silently hand that stale
+                            // contract's bytes back as the answer to this
+                            // request. A same-type response for a different key
+                            // is exactly as unrelated as a different-type one.
+                            if *response_key.id() != key {
+                                tracing::debug!(
+                                    expected = %key,
+                                    got = %response_key.id(),
+                                    "ignoring GetResponse for a different contract while awaiting GET"
+                                );
+                                continue;
+                            }
+                            break Ok(Some(state.as_ref().to_vec()));
+                        }
+                        Ok(HostResponse::ContractResponse(ContractResponse::NotFound {
+                            instance_id,
+                        })) => {
+                            if instance_id != key {
+                                tracing::debug!(
+                                    expected = %key,
+                                    got = %instance_id,
+                                    "ignoring NotFound for a different contract while awaiting GET"
+                                );
+                                continue;
+                            }
+                            break Ok(None);
+                        }
+                        Ok(other) => {
+                            tracing::debug!(
+                                ?other,
+                                "ignoring unrelated host response while awaiting GET"
+                            );
+                            continue;
+                        }
+                        Err(e) => break Err(anyhow::anyhow!("GET failed: {e}")),
                     }
-                    Ok(other) => {
-                        tracing::debug!(
-                            ?other,
-                            "ignoring unrelated host response while awaiting GET"
-                        );
-                        continue;
-                    }
-                    Err(e) => break Err(anyhow::anyhow!("GET failed: {e}")),
                 }
             };
 
@@ -499,6 +652,7 @@ impl FreenetBridge {
                 }
                 Err(e) if attempt < MAX_ATTEMPTS => {
                     tracing::warn!(attempt, error = %e, "GET failed, retrying");
+                    Self::reconnect(&mut api).await;
                     tokio::time::sleep(RETRY_DELAY).await;
                 }
                 Err(e) => {
@@ -546,36 +700,66 @@ impl FreenetBridge {
         let mut api = self.api.lock().await;
 
         for attempt in 1..=MAX_ATTEMPTS {
-            api.send(request.clone())
+            let send_result = api
+                .send(request.clone())
                 .await
-                .map_err(|e| anyhow::anyhow!("sending SUBSCRIBE request: {e}"))?;
+                .map_err(|e| anyhow::anyhow!("sending SUBSCRIBE request: {e}"));
 
-            let outcome = loop {
-                match api.recv().await {
-                    Ok(HostResponse::ContractResponse(ContractResponse::SubscribeResponse {
-                        subscribed,
-                        ..
-                    })) => break Ok(subscribed),
-                    // A `Subscribe` implicitly GETs the contract if the node
-                    // doesn't have it yet (see `ContractRequest::Subscribe`'s
-                    // own docs in freenet-stdlib), so a `NotFound` here is a
-                    // real answer to this request, not stray traffic: nobody
-                    // on the network is holding that contract right now.
-                    // Reported as `false` (not subscribed) rather than
-                    // retried three more times - a publisher whose index
-                    // hasn't propagated yet is an ordinary state on this
-                    // network, and the caller re-attempts on its own cadence.
-                    Ok(HostResponse::ContractResponse(ContractResponse::NotFound { .. })) => {
-                        break Ok(false)
+            let outcome: Result<bool> = if let Err(e) = send_result {
+                Err(e)
+            } else {
+                loop {
+                    match api.recv().await {
+                        Ok(HostResponse::ContractResponse(ContractResponse::SubscribeResponse {
+                            key: response_key,
+                            subscribed,
+                        })) => {
+                            // Same reasoning as `get_state`'s check: a retried
+                            // SUBSCRIBE can leave an earlier attempt's response
+                            // still in flight on this shared connection, so a
+                            // SubscribeResponse arriving here isn't guaranteed to
+                            // be for *this* key.
+                            if *response_key.id() != key {
+                                tracing::debug!(
+                                    expected = %key,
+                                    got = %response_key.id(),
+                                    "ignoring SubscribeResponse for a different contract while awaiting SUBSCRIBE"
+                                );
+                                continue;
+                            }
+                            break Ok(subscribed);
+                        }
+                        // A `Subscribe` implicitly GETs the contract if the node
+                        // doesn't have it yet (see `ContractRequest::Subscribe`'s
+                        // own docs in freenet-stdlib), so a `NotFound` here is a
+                        // real answer to this request, not stray traffic: nobody
+                        // on the network is holding that contract right now.
+                        // Reported as `false` (not subscribed) rather than
+                        // retried three more times - a publisher whose index
+                        // hasn't propagated yet is an ordinary state on this
+                        // network, and the caller re-attempts on its own cadence.
+                        Ok(HostResponse::ContractResponse(ContractResponse::NotFound {
+                            instance_id,
+                        })) => {
+                            if instance_id != key {
+                                tracing::debug!(
+                                    expected = %key,
+                                    got = %instance_id,
+                                    "ignoring NotFound for a different contract while awaiting SUBSCRIBE"
+                                );
+                                continue;
+                            }
+                            break Ok(false);
+                        }
+                        Ok(other) => {
+                            tracing::debug!(
+                                ?other,
+                                "ignoring unrelated host response while awaiting SUBSCRIBE"
+                            );
+                            continue;
+                        }
+                        Err(e) => break Err(anyhow::anyhow!("SUBSCRIBE failed: {e}")),
                     }
-                    Ok(other) => {
-                        tracing::debug!(
-                            ?other,
-                            "ignoring unrelated host response while awaiting SUBSCRIBE"
-                        );
-                        continue;
-                    }
-                    Err(e) => break Err(anyhow::anyhow!("SUBSCRIBE failed: {e}")),
                 }
             };
 
@@ -583,6 +767,7 @@ impl FreenetBridge {
                 Ok(subscribed) => return Ok(subscribed),
                 Err(e) if attempt < MAX_ATTEMPTS => {
                     tracing::warn!(attempt, error = %e, "SUBSCRIBE failed, retrying");
+                    Self::reconnect(&mut api).await;
                     tokio::time::sleep(RETRY_DELAY).await;
                 }
                 Err(e) => return Err(e),

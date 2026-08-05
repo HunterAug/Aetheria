@@ -1257,13 +1257,10 @@ socket (Node scripts) and through the real browser UI (Vite dev server on
 
 ### Known gaps / follow-ups
 
-- **`FreenetBridge` has no reconnect logic** (pre-existing, not introduced
-  here): the WebSocket is established once during `finish_unlock`, so once
-  the node process dies the delegate stays in `unknown` permanently until it
-  is itself restarted - observed directly during the kill test above. The
-  indicator reports this accurately and actionably, but auto-reconnect is
-  the obvious next step now that there's finally a signal that would drive
-  it.
+- ~~**`FreenetBridge` has no reconnect logic**~~ - fixed, see "Freenet
+  reconnect + single-instance enforcement" below. This gap was flagged here
+  as a known follow-up and then actually hit for real on a live install
+  within the same day.
 - The peer count is the node's **ring connection count**, which is about
   whether this node is meaningfully embedded in the network. It is not a
   guarantee that any particular GET/PUT will succeed - that's what the
@@ -1368,6 +1365,73 @@ already talks to.
   since that specific link needs a real desktop session to observe and is
   the one piece of this feature a live subscription-network test can't
   reach.
+
+## Freenet reconnect + single-instance enforcement (as of 2026-08-05)
+
+Reported live on a real install: the network status indicator (see above)
+was permanently stuck on "Can't reach your Freenet node" after the app had
+been running a while, with `query_error: "comm channel between client/host
+closed"`. Root-caused directly rather than guessed at, and it turned out to
+be two separate real bugs stacking:
+
+- **`FreenetBridge` never reconnected.** The bundled Freenet sidecar's own
+  auto-update supervisor (see "Supervise the bundled Freenet sidecar" above)
+  is *working as designed* - it correctly killed and respawned the node
+  process when a newer version (0.2.120) was detected - but nothing rebuilt
+  the delegate's own outstanding WebSocket to the node that had just been
+  replaced. Every `FreenetBridge` method held one connection for its entire
+  lifetime with no path back to a working state once that connection died,
+  exactly the gap this file's own "Known gaps" note under the network
+  status indicator had flagged as a followup, now confirmed to actually
+  happen on a real running install rather than just a theoretical risk.
+  - Also found while fixing this: a **structural bug** in every method's
+    retry loop. `api.send(request).await.map_err(...)?` used `?` to bail out
+    of the *entire method* on a send failure, completely skipping the
+    `for attempt in 1..=MAX_ATTEMPTS` retry loop below it - a send on a
+    dead connection fails immediately and identically every time, so this
+    meant a dead connection's first attempt was also its last, with no
+    retry ever actually happening for that failure mode.
+  - Fixed by folding a `send` failure into the same retryable `outcome` as a
+    `recv` failure (so it participates in the existing retry loop instead of
+    early-returning), and adding `FreenetBridge::reconnect` - rebuilds the
+    WebSocket to the node in place - called between retry attempts in
+    `put_new`/`update_state`/`get_state`/`subscribe`, and once (matching
+    `query_node_status`'s existing "no flakiness-retry-loop" design - a dead
+    transport is a different failure than gateway flakiness) in
+    `query_node_status`. `watcher.rs`'s dedicated subscription bridge
+    already had an equivalent fix at a coarser level (it discards and fully
+    rebuilds its own `FreenetBridge` on any failure, see its `'connection`
+    loop) and needed no change.
+  - **Verified live**: connected a scratch delegate to a scratch node,
+    confirmed `state: "connected"`, killed that node, confirmed the delegate
+    correctly reported `state: "unknown"` with the exact
+    `"comm channel between client/host closed"` error from the live bug
+    report, started a *fresh* node process on the same port (simulating the
+    supervisor's respawn), and confirmed `query_node_status` self-healed to
+    `state: "connected"` with a real peer count - then confirmed an actual
+    content operation (`get_latest_feed`, a `get_state` call) also
+    recovered, not just the diagnostics query.
+- **No single-instance enforcement**, which the tray change (see "Real
+  desktop notifications" above) turned into a real, reproducible failure
+  mode rather than a theoretical one: closing the window now hides instead
+  of quitting, so a user (or Windows, or a stray shortcut) launching
+  `aetheria.exe` again while the first copy is still alive in the tray used
+  to spawn a **second, fully independent** set of Freenet + delegate
+  sidecars, both pointing at the same shared Freenet data directory. Found
+  directly on the live install this bug was reported on: two `aetheria.exe`
+  processes running, only one with real sidecar children, and the Freenet
+  log showing repeated `"Failed to load contract store ... Database already
+  open. Cannot acquire lock"` from the second one colliding with the first.
+  `tauri-plugin-single-instance` (registered first, per its own requirement,
+  in `app/src-tauri/src/main.rs`) now intercepts a second launch before
+  `.setup()` ever runs and just focuses the existing window instead.
+  **Verified live**: launched the real installed app twice in a row -
+  confirmed only one `aetheria.exe`/`aetheria-delegate.exe`/`freenet.exe`
+  triplet ever exists, and a real `get_network_status` query against the
+  survivor reported `state: "connected"`.
+
+All 16 non-network delegate unit tests pass, `tsc` is clean, and
+`npm run build:desktop` succeeds with no warnings.
 
 ## Known stub / unimplemented areas
 

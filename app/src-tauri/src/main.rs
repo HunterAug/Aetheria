@@ -261,6 +261,16 @@ fn supervise_freenet(app: AppHandle, args: Vec<String>) {
 
 fn main() {
     tauri::Builder::default()
+        // Must be the first plugin registered (Tauri's own requirement) -
+        // its whole job is to intercept a second launch before anything
+        // else in `.setup()` below ever runs, so the second process never
+        // gets a chance to spawn its own competing sidecars. When a second
+        // launch is caught, this callback runs *inside the already-running
+        // instance* - bringing that window forward is the entire point,
+        // there is nothing else for a relaunch to do.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_main_window(app);
+        }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![show_notification])
