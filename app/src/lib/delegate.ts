@@ -93,6 +93,12 @@ export interface FeedItem {
   /// Hex-encoded Ed25519 pubkey of whoever published this post.
   author_pubkey: string;
   author_display_name: string;
+  /// The author's avatar, as a `PostDataContract` id fetchable via
+  /// `getRemoteAvatar` - `null` if they've never set one (or, for someone
+  /// else's post, if this delegate has never viewed their profile yet - see
+  /// `handle_get_latest_feed`'s module docs on why that's a real gap, not a
+  /// bug).
+  author_avatar_freenet_key: string | null;
   is_own: boolean;
   /// `true` for a `subscriber`-access post from someone *other* than this
   /// delegate - unopenable for now, since decrypting it needs the
@@ -192,6 +198,7 @@ export interface OpenedPost {
   markdown: string;
   author_pubkey: string;
   author_display_name: string;
+  author_avatar_freenet_key: string | null;
   is_own: boolean;
 }
 
@@ -471,6 +478,13 @@ class DelegateClient {
   /// first and don't call this for a locked item.
   getRemotePost(postContractId: string): Promise<RemotePostDetail> {
     return this.call("get_remote_post", { post_contract_id: postContractId });
+  }
+
+  /// Fetches an avatar image (own or any other publisher's, whichever
+  /// `author_avatar_freenet_key` a `FeedItem`/`OpenedPost`/`PublisherProfileData`
+  /// happens to carry) as a ready-to-render `data:` URL.
+  getRemoteAvatar(avatarFreenetKey: string): Promise<{ avatar_data_url: string }> {
+    return this.call("get_remote_avatar", { avatar_freenet_key: avatarFreenetKey });
   }
 }
 

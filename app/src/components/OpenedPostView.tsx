@@ -7,7 +7,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { markdownComponents } from "./ReaderFeed";
 import type { OpenedPost } from "../lib/delegate";
-import { initial } from "../lib/format";
+import Avatar from "./Avatar";
 
 export default function OpenedPostView({
   post,
@@ -26,9 +26,12 @@ export default function OpenedPostView({
 }) {
   const authorInner = (
     <>
-      <div className="w-7 h-7 rounded-full bg-aetheria-gradient flex items-center justify-center text-xs font-semibold text-white">
-        {initial(post.author_display_name)}
-      </div>
+      <Avatar
+        name={post.author_display_name}
+        avatarFreenetKey={post.author_avatar_freenet_key}
+        size="xs"
+        shrink={false}
+      />
       <span className="text-sm font-semibold text-neutral-300 group-hover:underline">
         {post.author_display_name}
       </span>

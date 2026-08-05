@@ -173,6 +173,16 @@ enum Request {
     GetRemotePost {
         post_contract_id: String,
     },
+    /// Fetches an avatar image (this delegate's own, or any other
+    /// publisher's whose key it already knows via a feed item / profile) by
+    /// its `PostDataContract` id and returns it as a `data:` URL ready to
+    /// drop into an `<img src>` - see `handle_get_remote_avatar`. Avatars are
+    /// published as `Public`-access posts (see `contracts::publish_avatar_to_network`),
+    /// so this is answerable for *any* publisher, unlike `GetRemotePost`'s
+    /// subscriber-access restriction.
+    GetRemoteAvatar {
+        avatar_freenet_key: String,
+    },
     /// Is this delegate's Freenet node actually part of the network right
     /// now? Answered by asking the node itself how many peers it holds ring
     /// connections to (see `FreenetBridge::query_node_status`), alongside
@@ -645,6 +655,9 @@ async fn handle_request(delegate: &mut Delegate, request: Request) -> Result<ser
                 }
                 Request::GetRemotePost { post_contract_id } => {
                     handle_get_remote_post(delegate, &post_contract_id).await
+                }
+                Request::GetRemoteAvatar { avatar_freenet_key } => {
+                    handle_get_remote_avatar(delegate, &avatar_freenet_key).await
                 }
             }
         }
@@ -1346,6 +1359,7 @@ fn feed_item_json(
     published_at: u64,
     author_pubkey: [u8; 32],
     author_display_name: &str,
+    author_avatar_freenet_key: Option<&str>,
     is_own: bool,
     post_contract_id: Option<String>,
 ) -> serde_json::Value {
@@ -1362,6 +1376,7 @@ fn feed_item_json(
         "published_at": published_at,
         "author_pubkey": hex::encode(author_pubkey),
         "author_display_name": author_display_name,
+        "author_avatar_freenet_key": author_avatar_freenet_key,
         "is_own": is_own,
         "locked": locked,
         "post_contract_id": post_contract_id,
@@ -1373,7 +1388,18 @@ fn feed_item_json(
 /// interchangeable to the UI by design, since the whole point of the cache
 /// is that "seen once" and "seen just now" should look identical once
 /// something's in a feed.
-fn cached_post_feed_item(row: &crate::db::CachedRemotePost, is_own: bool) -> serde_json::Value {
+///
+/// `author_avatar_freenet_key` isn't stored on `CachedRemotePost` itself (the
+/// cache exists for post headers, and an avatar can change independently of
+/// any given post) - passed in by the caller, which already has it on hand
+/// from whatever it just resolved the author's identity through (a followed
+/// publisher's cached row, a just-fetched or cached profile, or this
+/// delegate's own).
+fn cached_post_feed_item(
+    row: &crate::db::CachedRemotePost,
+    author_avatar_freenet_key: Option<&str>,
+    is_own: bool,
+) -> serde_json::Value {
     let locked = row.access_level == "subscriber" && !is_own;
     serde_json::json!({
         "post_id": hex::encode(row.post_id),
@@ -1384,6 +1410,7 @@ fn cached_post_feed_item(row: &crate::db::CachedRemotePost, is_own: bool) -> ser
         "published_at": row.published_at,
         "author_pubkey": hex::encode(row.author_pubkey),
         "author_display_name": row.author_display_name,
+        "author_avatar_freenet_key": author_avatar_freenet_key,
         "is_own": is_own,
         "locked": locked,
         "post_contract_id": row.post_contract_id,
@@ -1450,6 +1477,7 @@ async fn followed_feed_items(delegate: &Delegate) -> Vec<serde_json::Value> {
                         header.published_at,
                         f.author_pubkey,
                         &f.display_name,
+                        f.avatar_freenet_key.as_deref(),
                         false,
                         Some(header.post_contract_id),
                     ));
@@ -1472,7 +1500,7 @@ async fn followed_feed_items(delegate: &Delegate) -> Vec<serde_json::Value> {
                     if seen.contains(&row.post_contract_id) {
                         continue;
                     }
-                    items.push(cached_post_feed_item(&row, false));
+                    items.push(cached_post_feed_item(&row, f.avatar_freenet_key.as_deref(), false));
                 }
             }
             Err(e) => tracing::warn!(
@@ -1513,6 +1541,18 @@ async fn handle_get_following_feed(delegate: &Delegate) -> Result<serde_json::Va
 /// its own, rather than propagating the error and showing nothing.
 async fn handle_get_latest_feed(delegate: &Delegate) -> Result<serde_json::Value> {
     let self_pubkey = delegate.unlocked().keys.master_signing_verifying_bytes();
+    // `GlobalDirectoryEntry` doesn't carry the author's avatar - it's a
+    // network-wide contract every publisher's delegate appends a signed
+    // entry to, and re-signing every past entry whenever an avatar changes
+    // isn't something this contract supports (entries are immutable once
+    // signed, see its module docs). So the avatar shown per-entry is
+    // resolved locally instead: this delegate's own known avatar for its own
+    // entries, or whatever profile snapshot this delegate has already cached
+    // for anyone else (`cached_remote_profiles`, populated by
+    // `handle_get_publisher_profile`) - `None` (renders as an initial in the
+    // UI) for a publisher whose profile has never been viewed yet, same as
+    // before this feature existed.
+    let own_avatar_key = contracts::known_avatar_key(&delegate.db)?;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -1539,6 +1579,14 @@ async fn handle_get_latest_feed(delegate: &Delegate) -> Result<serde_json::Value
                 }
                 seen.insert(e.post_contract_id.clone());
                 let is_own = e.author_pubkey == self_pubkey;
+                let avatar_freenet_key = if is_own {
+                    own_avatar_key.clone()
+                } else {
+                    delegate
+                        .db
+                        .get_cached_remote_profile(&e.author_pubkey)?
+                        .and_then(|p| p.avatar_freenet_key)
+                };
                 items.push(feed_item_json(
                     e.post_id,
                     &e.title,
@@ -1548,6 +1596,7 @@ async fn handle_get_latest_feed(delegate: &Delegate) -> Result<serde_json::Value
                     e.published_at,
                     e.author_pubkey,
                     &e.author_display_name,
+                    avatar_freenet_key.as_deref(),
                     is_own,
                     Some(e.post_contract_id),
                 ));
@@ -1568,7 +1617,15 @@ async fn handle_get_latest_feed(delegate: &Delegate) -> Result<serde_json::Value
                     continue;
                 }
                 let is_own = row.author_pubkey == self_pubkey;
-                items.push(cached_post_feed_item(&row, is_own));
+                let avatar_freenet_key = if is_own {
+                    own_avatar_key.clone()
+                } else {
+                    delegate
+                        .db
+                        .get_cached_remote_profile(&row.author_pubkey)?
+                        .and_then(|p| p.avatar_freenet_key)
+                };
+                items.push(cached_post_feed_item(&row, avatar_freenet_key.as_deref(), is_own));
             }
         }
         Err(err) => tracing::warn!(error = %err, "reading cached posts for the Latest feed failed"),
@@ -1671,6 +1728,7 @@ async fn handle_get_publisher_profile(
                     header.published_at,
                     author_pubkey,
                     &display_name,
+                    avatar_freenet_key.as_deref(),
                     is_own,
                     Some(header.post_contract_id),
                 ));
@@ -1686,7 +1744,7 @@ async fn handle_get_publisher_profile(
                 if seen.contains(&row.post_contract_id) {
                     continue;
                 }
-                post_items.push(cached_post_feed_item(&row, is_own));
+                post_items.push(cached_post_feed_item(&row, avatar_freenet_key.as_deref(), is_own));
             }
         }
         Err(e) => tracing::warn!(error = %e, "reading cached posts for a publisher's profile failed"),
@@ -1754,6 +1812,75 @@ async fn handle_get_remote_post(
             }
             Err(e)
         }
+    }
+}
+
+/// Fetches an avatar image (own or another publisher's) by its
+/// `PostDataContract` id and returns it as a ready-to-render `data:` URL.
+///
+/// Avatars are published `Public` (see `contracts::publish_avatar_to_network`'s
+/// module docs), so - unlike `handle_get_remote_post` - there's no access
+/// check here: anyone who knows the key can fetch it, same as the network
+/// itself allows. The payload is raw image bytes with no mime metadata (the
+/// upload path never sent one over the network, only kept it in this
+/// delegate's own local `profile` row), so the mime type is recovered by
+/// sniffing the image's own magic bytes instead - reliable for the common
+/// formats a `<input type="file" accept="image/*">` upload actually produces,
+/// and a fixed set is easier to keep correct than plumbing a new metadata
+/// field through the avatar's `PostDataContract` payload for this alone.
+///
+/// A live fetch failure falls back to `db.rs`'s `cached_avatars` (same "seen
+/// once, yours to keep" durability as `handle_get_remote_post`'s markdown
+/// cache) rather than erroring if a previous fetch already succeeded.
+async fn handle_get_remote_avatar(
+    delegate: &Delegate,
+    avatar_freenet_key: &str,
+) -> Result<serde_json::Value> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    match contracts::fetch_remote_post_payload(&delegate.unlocked().freenet, avatar_freenet_key).await {
+        Ok(payload) => {
+            let mime = sniff_image_mime(&payload.cipher_text);
+            if let Err(e) = delegate.db.cache_avatar(avatar_freenet_key, mime, &payload.cipher_text, now) {
+                tracing::warn!(error = %e, "caching a remote avatar failed");
+            }
+            Ok(serde_json::json!({
+                "avatar_freenet_key": avatar_freenet_key,
+                "avatar_data_url": encode_data_url(mime, &payload.cipher_text),
+            }))
+        }
+        Err(e) => {
+            if let Some((mime, bytes)) = delegate.db.get_cached_avatar(avatar_freenet_key)? {
+                tracing::warn!(error = %e, "fetching remote avatar live failed - serving cached copy");
+                return Ok(serde_json::json!({
+                    "avatar_freenet_key": avatar_freenet_key,
+                    "avatar_data_url": encode_data_url(&mime, &bytes),
+                }));
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Identifies an image's format from its own leading magic bytes rather than
+/// trusting a filename/extension nobody supplied over the network - the
+/// formats a browser `<input type="file" accept="image/*">` upload actually
+/// produces in practice. Falls back to PNG (arbitrary but harmless: browsers
+/// render an `<img>` from its real bytes regardless of a mismatched `data:`
+/// mime prefix) rather than failing outright for a format outside this list.
+fn sniff_image_mime(bytes: &[u8]) -> &'static str {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "image/png"
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        "image/jpeg"
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        "image/gif"
+    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        "image/webp"
+    } else {
+        "image/png"
     }
 }
 

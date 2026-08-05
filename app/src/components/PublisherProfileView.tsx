@@ -8,7 +8,7 @@ import {
 import { openFeedItem } from "../lib/feedItem";
 import { FeedItemsList } from "./FeedItemsList";
 import OpenedPostView from "./OpenedPostView";
-import { initial } from "../lib/format";
+import Avatar from "./Avatar";
 
 /// Viewing another publisher's profile page - reached by clicking an
 /// author's name in any feed. The Follow/Unfollow button here is the
@@ -94,9 +94,11 @@ export default function PublisherProfileView({
         ) : (
           <div className="flex items-start justify-between gap-4">
             <div className="flex items-center gap-4">
-              <div className="w-16 h-16 rounded-full bg-aetheria-gradient flex items-center justify-center text-xl font-semibold text-white shrink-0">
-                {initial(data.display_name)}
-              </div>
+              <Avatar
+                name={data.display_name}
+                avatarFreenetKey={data.avatar_freenet_key}
+                size="md"
+              />
               <div>
                 <h2 className="text-xl font-bold text-neutral-100">{data.display_name}</h2>
                 {data.bio && (

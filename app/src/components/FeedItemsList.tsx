@@ -4,8 +4,9 @@
 // instead of drifting between the two feeds.
 
 import type { FeedItem } from "../lib/delegate";
-import { initial, relativeTime } from "../lib/format";
+import { relativeTime } from "../lib/format";
 import { LockIcon } from "./icons";
+import Avatar from "./Avatar";
 
 export function FeedItemsList({
   items,
@@ -31,13 +32,11 @@ export function FeedItemsList({
           className="hover:bg-ink-900/60 transition-colors"
         >
           <div className="px-6 py-4 flex gap-3">
-            {/* TODO(later): fetch and render the followed publisher's real
-                avatar image (`avatar_freenet_key`) instead of an initial -
-                deferred to keep this pass scoped to text/metadata, which is
-                all `PostMetadataHeader`/`FollowedPublisherRow` carry today. */}
-            <div className="w-9 h-9 rounded-full bg-aetheria-gradient flex items-center justify-center text-sm font-semibold text-white shrink-0">
-              {initial(item.author_display_name)}
-            </div>
+            <Avatar
+              name={item.author_display_name}
+              avatarFreenetKey={item.author_avatar_freenet_key}
+              size="sm"
+            />
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2 text-sm flex-wrap">
                 {!item.is_own && onViewAuthor ? (

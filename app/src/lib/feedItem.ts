@@ -15,6 +15,7 @@ export async function openFeedItem(item: FeedItem): Promise<OpenedPost> {
       markdown: detail.markdown,
       author_pubkey: item.author_pubkey,
       author_display_name: item.author_display_name,
+      author_avatar_freenet_key: item.author_avatar_freenet_key,
       is_own: true,
     };
   }
@@ -29,6 +30,7 @@ export async function openFeedItem(item: FeedItem): Promise<OpenedPost> {
     markdown: detail.markdown,
     author_pubkey: item.author_pubkey,
     author_display_name: item.author_display_name,
+    author_avatar_freenet_key: item.author_avatar_freenet_key,
     is_own: false,
   };
 }

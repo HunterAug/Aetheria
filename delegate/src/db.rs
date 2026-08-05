@@ -214,6 +214,21 @@ impl LocalStore {
                 cached_at        INTEGER NOT NULL
             );
 
+            -- Durable local cache of avatar image bytes fetched from the
+            -- network (own or any other publisher's, keyed by the same
+            -- `PostDataContract` id `avatar_freenet_key` already points at -
+            -- see `contracts::publish_avatar_to_network`). Separate from
+            -- `cached_post_payloads` since that one holds UTF-8 markdown and
+            -- this holds arbitrary binary image bytes plus the sniffed mime
+            -- type needed to render them (avatars carry no mime metadata on
+            -- the network itself - see `handle_get_remote_avatar`).
+            CREATE TABLE IF NOT EXISTS cached_avatars (
+                avatar_freenet_key TEXT PRIMARY KEY,
+                mime                TEXT NOT NULL,
+                bytes               BLOB NOT NULL,
+                cached_at           INTEGER NOT NULL
+            );
+
             -- Every post this delegate has already accounted for as far as
             -- desktop notifications are concerned (see `watcher.rs`). A row
             -- here means "do not toast about this post again" - either
@@ -768,6 +783,39 @@ impl LocalStore {
                 "SELECT markdown FROM cached_post_payloads WHERE post_contract_id = ?1",
                 params![post_contract_id],
                 |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn cache_avatar(
+        &self,
+        avatar_freenet_key: &str,
+        mime: &str,
+        bytes: &[u8],
+        cached_at: u64,
+    ) -> Result<()> {
+        self.conn.lock().expect("db mutex poisoned").execute(
+            "INSERT INTO cached_avatars (avatar_freenet_key, mime, bytes, cached_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(avatar_freenet_key) DO UPDATE SET
+                mime = excluded.mime, bytes = excluded.bytes, cached_at = excluded.cached_at",
+            params![avatar_freenet_key, mime, bytes, cached_at as i64],
+        )?;
+        Ok(())
+    }
+
+    /// The last successfully-cached copy of an avatar's image bytes, or
+    /// `None` if it's never been fetched successfully before -
+    /// `handle_get_remote_avatar`'s fallback when a live fetch fails.
+    pub fn get_cached_avatar(&self, avatar_freenet_key: &str) -> Result<Option<(String, Vec<u8>)>> {
+        self.conn
+            .lock()
+            .expect("db mutex poisoned")
+            .query_row(
+                "SELECT mime, bytes FROM cached_avatars WHERE avatar_freenet_key = ?1",
+                params![avatar_freenet_key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
             .map_err(Into::into)
