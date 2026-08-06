@@ -6,12 +6,10 @@
 //! without duplicating it. `main.rs` is now a thin wrapper around this.
 
 pub mod contracts;
-pub mod crypto;
 pub mod db;
 pub mod freenet_bridge;
 pub mod ipc;
 pub mod keys;
-pub mod nwc;
 pub mod watcher;
 
 #[cfg(test)]
@@ -20,8 +18,6 @@ mod follow_publisher_e2e_test;
 mod network_status_e2e_test;
 #[cfg(test)]
 mod new_post_notification_e2e_test;
-#[cfg(test)]
-mod subscriber_registry_e2e_test;
 
 /// Local WebSocket port the UI (React/Tauri) connects to for IPC.
 /// Port 3000 is reserved for the frontend dev server on this machine, so the

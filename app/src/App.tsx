@@ -2,8 +2,6 @@ import { useEffect, useState } from "react";
 import Editor from "./components/Editor";
 import ReaderFeed from "./components/ReaderFeed";
 import Following from "./components/Following";
-import SubscriberPortal from "./components/SubscriberPortal";
-import Subscriptions from "./components/Subscriptions";
 import PublisherProfileView from "./components/PublisherProfileView";
 import About from "./components/About";
 import Profile from "./components/Profile";
@@ -21,8 +19,6 @@ export type Tab =
   | "feed"
   | "latest"
   | "following"
-  | "subscribers"
-  | "subscriptions"
   | "about"
   | "profile"
   | "settings";
@@ -135,8 +131,6 @@ export default function App() {
               />
             )}
             {tab === "following" && <Following onViewAuthor={setViewingAuthor} />}
-            {tab === "subscribers" && <SubscriberPortal />}
-            {tab === "subscriptions" && <Subscriptions />}
             {tab === "about" && <About />}
             {tab === "profile" && (
               <Profile onEditProfile={() => setTab("settings")} />

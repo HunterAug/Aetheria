@@ -1,5 +1,12 @@
-//! Key management: the publisher's Ed25519 master signing key and the
-//! reader's Secp256k1 identity key used for ECDH key exchange.
+//! Key management: the publisher's Ed25519 master signing key, plus a
+//! secp256k1 identity key that's no longer used for anything (it backed the
+//! ECDH subscriber-key exchange from Aetheria's now-removed payments/
+//! subscriptions feature). Kept rather than dropped: it's baked into the
+//! on-disk encrypted identity file's fixed 64-byte key-material layout (see
+//! below), and this machine's real, already-published identity was created
+//! under that layout - removing the field would mean either a breaking
+//! format migration or generating a fresh keypair, neither of which buys
+//! anything now that nothing reads it.
 //!
 //! The identity file on disk is encrypted at rest: a passphrase is stretched
 //! through Argon2id into an AES-256-GCM key that wraps the raw 64 bytes of
@@ -168,12 +175,10 @@ impl DelegateKeys {
     }
 
     /// Compressed SEC1 encoding of this delegate's secp256k1 identity public
-    /// key - the 33-byte form `EncryptedKeyBundle::subscriber_pubkey` and
-    /// `crypto.rs`'s ECDH helpers use everywhere (1 parity byte + 32-byte
-    /// x-coordinate). There's only one secp256k1 identity per delegate; it
-    /// plays whichever ECDH role (`derive_shared_secret`'s "publisher" or
-    /// "subscriber" argument) a given exchange calls for, since ECDH is
-    /// symmetric in the key that's used, not in a type-level distinction.
+    /// key (1 parity byte + 32-byte x-coordinate). Currently unused - see
+    /// this module's top-level docs on why the underlying keypair is kept
+    /// anyway.
+    #[allow(dead_code)]
     pub fn identity_public_compressed(&self) -> [u8; 33] {
         let point = self.identity_secret.public_key().to_encoded_point(true);
         point

@@ -121,6 +121,14 @@ export default function Profile({
             Edit profile
           </button>
         </div>
+        {profile?.author_pubkey && (
+          <p className="text-xs text-neutral-600 mt-4">
+            Your publication key - share this so others can follow you:{" "}
+            <span className="font-mono text-neutral-500 select-all">
+              {profile.author_pubkey}
+            </span>
+          </p>
+        )}
       </div>
 
       {error && <p className="text-sm text-red-400 px-6 pt-4">{error}</p>}
@@ -149,11 +157,6 @@ export default function Profile({
                 <span className="text-neutral-500">
                   {relativeTime(post.published_at)}
                 </span>
-                {post.access_level === "subscriber" && (
-                  <span className="text-xs bg-aepurple-500/15 text-aepurple-400 px-1.5 py-0.5 rounded">
-                    Subscriber
-                  </span>
-                )}
                 {opening === post.post_id && (
                   <span className="text-xs text-neutral-500">opening…</span>
                 )}

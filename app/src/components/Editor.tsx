@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { delegate, type AccessLevel } from "../lib/delegate";
+import { delegate } from "../lib/delegate";
 
 type Status =
   | { kind: "idle" }
@@ -14,7 +14,6 @@ export default function Editor() {
   const [title, setTitle] = useState("");
   const [summary, setSummary] = useState("");
   const [markdown, setMarkdown] = useState("");
-  const [access, setAccess] = useState<AccessLevel>("public");
   const [status, setStatus] = useState<Status>({ kind: "idle" });
 
   async function publish() {
@@ -24,7 +23,6 @@ export default function Editor() {
         title,
         summary,
         markdown,
-        access,
       });
       setStatus({ kind: "success", postId: post_id });
       setTitle("");
@@ -44,8 +42,8 @@ export default function Editor() {
     <div className="px-6 py-5 max-w-2xl mx-auto">
       <h2 className="text-xl font-semibold text-neutral-100 mb-1">Draft</h2>
       <p className="text-sm text-neutral-500 mb-5">
-        Publishes to your local Delegate. Subscriber posts are AES-256-GCM
-        encrypted with this epoch's key before they're stored.
+        Publishes to your local Delegate, then syncs to the real Freenet
+        network. Every post is public.
       </p>
 
       <div className="space-y-3">
@@ -68,19 +66,7 @@ export default function Editor() {
           onChange={(e) => setMarkdown(e.target.value)}
         />
 
-        <div className="flex items-center justify-between pt-1">
-          <label className="flex items-center gap-2 text-sm text-neutral-400">
-            <input
-              type="checkbox"
-              checked={access === "subscriber"}
-              onChange={(e) =>
-                setAccess(e.target.checked ? "subscriber" : "public")
-              }
-              className="accent-aeblue-500"
-            />
-            Subscriber-only
-          </label>
-
+        <div className="flex items-center justify-end pt-1">
           <button
             onClick={publish}
             disabled={!canPublish || status.kind === "publishing"}

@@ -12,15 +12,17 @@ crypto flows, and the 16-week roadmap).
   trait (`validate_state` / `update_state` / `summarize_state` / `get_state_delta`).
   - `aetheria-types/` — shared structs used across contracts and the delegate.
   - `publisher-profile-contract/`, `content-index-contract/`,
-    `post-data-contract/`, `subscriber-registry-contract/` — one crate per
-    contract from design doc §3.
+    `post-data-contract/` — one crate per contract from design doc §3.
+    (`subscriber-registry-contract/` existed here too until payments/
+    subscriptions were removed - see "Payments and subscriptions removed"
+    below.)
   - `global-directory-contract/` — **not** in the design doc; backs the
     Latest (network-wide) feed. See "Home = following-only feed, Latest =
     network-wide feed" below for why it exists.
-- `delegate/` — native Rust daemon (Tokio), Layer 2. Owns keys, crypto,
-  Freenet bridge, NWC payments, local SQLite cache. Never expose key
-  material or ciphertext across the IPC boundary to the UI — only decrypted
-  content and derived state. Both a library (`src/lib.rs`, `pub mod`s for
+- `delegate/` — native Rust daemon (Tokio), Layer 2. Owns keys, the Freenet
+  bridge, and a local SQLite cache. Never expose key material across the IPC
+  boundary to the UI — only content and derived state. Both a library
+  (`src/lib.rs`, `pub mod`s for
   `contracts`/`freenet_bridge`/etc.) and two binaries: `aetheria-delegate`
   (`src/main.rs`, the real daemon - thin wrapper around the library) and
   `snapshot-latest-feed` (`src/bin/`, read-only, feeds `website/`'s Latest
@@ -165,10 +167,6 @@ lot of back-and-forth. All three are plain bash, run from anywhere via
 
 - Contract state structs live in `aetheria-types` if used by more than one
   contract or by the delegate; contract-local structs stay in that crate.
-- Epoch-key crypto math (ECDH → HKDF → AES-256-GCM) lives in
-  `delegate/src/crypto.rs` and should mirror design doc §4.2 exactly —
-  that section is the spec for interop between publisher and subscriber
-  delegates, don't improvise a different KDF or nonce scheme.
 - Unimplemented subsystems are marked with `todo!()` plus a `// TODO(PhaseN):`
   comment citing the doc section, not silently stubbed with fake success.
 - Every contract crate under `contracts/*-contract/` needs **both**:
@@ -624,159 +622,65 @@ just adding a request type:
     the identical `try_legacy_auto_unlock` call site - noted here rather than
     claimed as directly observed.
 
-## NWC subscription flow: real ECDH key delivery + real NIP-47 (as of 2026-08-02)
+## Payments and subscriptions removed (as of 2026-08-05)
 
-Phase 3 (design doc §5.2/6.1, Workflow B) is implemented: a reader connects a
-Lightning wallet via Nostr Wallet Connect, subscribes to a tier, and gets an
-ECDH-encrypted epoch key bundle appended to a real `SubscriberRegistryContract`
-on the real Freenet network. Three things were built and are worth
-distinguishing by how thoroughly each was actually verified:
+The user decided to drop payments/subscriptions entirely: Aetheria is now a
+free, follow-only publishing platform. Everything below this note that used
+to describe the NWC/Lightning subscription flow and the 2% platform fee (both
+built and verified live against a real Bitcoin network, per this file's own
+prior history) has been ripped out, not merely disabled:
 
-**(a) Verified for real, with concrete evidence:**
-
-- **ECDH key delivery + `SubscriberRegistryContract` over the real network.**
-  `delegate/src/contracts.rs` gained `subscriber_registry_key_for` (a *pure,
-  local* computation - `ContractKey::from_params_and_code(params, code)` is
-  a deterministic hash, the same one `FreenetBridge::put_new` computes
-  internally, so any delegate holding the same compiled contract code and a
-  publisher's Ed25519 pubkey can independently derive their
-  `SubscriberRegistryContract` key with **no discovery call, no pointer
-  field anywhere** - this is why the contract doesn't need a "where do I
-  find this" field), plus `ensure_subscriber_registry` (mint-once, lazy -
-  only the first time someone actually subscribes, unlike
-  `ensure_publisher_identity`'s eager content_index/profile),
-  `publish_key_bundle_to_network` (publisher side), and `fetch_key_bundle`
-  (reader side, network-only, no local DB dependency).
-  `delegate/src/subscriber_registry_e2e_test.rs` (`#[cfg(test)]`, declared
-  from `main.rs`, `#[ignore]`d since it needs a live node - run with `cargo
-  test subscriber_registry_e2e -- --ignored --nocapture`) simulates two
-  *genuinely independent* secp256k1 identities (not the single-identity
-  degenerate case the IPC handler exercises) round-tripping a real epoch key
-  through the real network: publisher encrypts, publishes; a second,
-  independent `FreenetBridge` connection (standing in for a different
-  process) fetches and decrypts using only its own secret + the publisher's
-  known public keys, and recovers the exact same epoch key. Independently
-  re-confirmed both this test's contract and the full IPC `subscribe` flow's
-  contract with `fdev -p 7509 execute get <key>` from a separate shell (same
-  methodology as the post-data/content-index verification above) - real CBOR
-  bytes, real `bundles` array, matching `EncryptedKeyBundle`'s schema.
-- **Real NIP-47 protocol mechanics, over a real public relay, zero real
-  money.** `delegate/src/nwc.rs` uses the `nwc` crate (rust-nostr project,
-  pinned to the stable `0.44.0` - `0.45.x` is alpha-only as of 2026-08, see
-  that file's module docs for the version survey and for working out the
-  actual request direction from the real NIP-47 spec instead of the design
-  doc's misleading §6.1 wire sketch). `nwc` only implements the *client*
-  side of NIP-47 (talks to a wallet you already have), so there was no
-  ready-made way to test it without a funded real wallet - solved the same
-  way this project solved "no external infra to test against" for Freenet
-  (`fdev` + a local node): built a mock NIP-47 *wallet service* directly on
-  `nostr-sdk` (dev-dependency only, not shipped) in
-  `delegate/examples/nwc_protocol_check.rs` - real Nostr keys, a real
-  connection to `wss://nos.lol` (public relay; `wss://relay.damus.io`
-  intermittently 503s, use `AETHERIA_NWC_TEST_RELAY` to override), real
-  kind 13194/23194/23195 events, real NIP-04 encryption. It drives two
-  independent `nwc::NWC` client connections (different per-app secrets, same
-  mock wallet pubkey - exactly how one real wallet serves multiple apps)
-  through `make_invoice` → `pay_invoice` → `lookup_invoice`, and passed:
-  `cargo run --example nwc_protocol_check` prints the full encrypted
-  request/response trace and a final PASS. `delegate/examples/mock_nwc_wallet.rs`
-  is the same mock wallet as a long-running process (prints its connection
-  URI) - used to drive the **actual production code**, not just the
-  protocol-check harness: ran the real `aetheria-delegate` binary
-  (`AETHERIA_DEV_PASSPHRASE` set, this machine's real existing identity) and
-  called `connect_wallet` → `get_subscription_info` → `subscribe` →
-  `list_subscribers` over the real IPC socket (a small Python
-  `websockets` script, `cargo run` doesn't apply here). Real
-  `SubscriberRegistryContract` key `DuxRTe51t6WTwpnFiHGDeX1egRQGC1ZA7shs8TgxPwEM`
-  was independently confirmed via `fdev execute get` afterward.
-- **`SubscriberPortal.tsx` end-to-end in the browser.** Real "Connect
-  Wallet" input (paste a `nostr+walletconnect://...` URI), real tier
-  display, real "Subscribe" action - all driven through
-  `app/src/lib/delegate.ts`'s new `connectWallet`/`getSubscriptionInfo`/
-  `subscribe`/`listSubscribers` methods, no placeholders. Verified rendering
-  real data (the real publication key, the hardcoded tier, and the real
-  subscriber entry from the `list_subscribers` test above) via the Vite dev
-  server against the real running delegate.
-
-**(b) Built correctly per spec, not fully verifiable without real funds:**
-
-- A real end-to-end payment against a **real funded Lightning wallet** was
-  never attempted, per this task's explicit scope (no real money/sats, no
-  signing up for any funded service). `NwcClient::pay_invoice` is exercised
-  above only against the mock wallet's fake settlement - the NIP-47 wire
-  mechanics are proven real, but real Lightning settlement itself (routing,
-  fees, actual on-chain/off-chain finality) is the one piece that
-  genuinely needs the user's own wallet to verify.
-
-**(c) Left as TODO, matching this task's explicit scope:**
-
-- `default_tiers()` in `ipc.rs` hardcodes a single "Supporter" tier
-  (5,000 sats/month) - real multi-tier configuration in Settings
-  (populating `PublisherProfile.subscription_tiers`, still always `vec![]`
-  from `ensure_publisher_identity`) was explicitly out of scope.
-- `handle_subscribe` verifies settlement via NIP-47 `lookup_invoice` polling
-  rather than the optional real-time notification extension (kind 23196) -
-  `lookup_invoice` is base-spec, universally supported; notifications are
-  an add-on some wallets skip. See `nwc.rs`'s module docs.
-- A reader subscribing to a publication that *isn't* their own identity has
-  no UI yet - this app has no concept of browsing other publications at all
-  (same limitation the existing single-identity publish/feed loop already
-  has, see above). `contracts::fetch_key_bundle` is real, tested, and ready
-  for that reader-side code path once it exists; it's just not called from
-  `ipc.rs` yet.
-
-## Optional 2% platform fee (as of 2026-08-02)
-
-Design doc §6.3's "Optional App Split": `handle_subscribe` in `ipc.rs`
-requests a small fee invoice (2%, `PLATFORM_FEE_BASIS_POINTS = 200`) from a
-second, separate `NwcClient` alongside the main subscription payment, paid
-by the reader's already-connected wallet. Best-effort, non-blocking - a
-hiccup collecting the fee never affects whether the subscriber gets
-access (same philosophy as everything else in this file); the IPC response
-carries `platform_fee_synced`/`platform_fee_error` so this is reported
-honestly rather than silently swallowed either way.
-
-- **Off by default.** `main.rs::connect_platform_fee_wallet` only connects
-  this second wallet if `AETHERIA_PLATFORM_FEE_NWC` is set to a real
-  `nostr+walletconnect://...` URI - unset for anyone else building/forking
-  this project, so a fork doesn't silently try to pay a stranger's wallet.
-- **Never commit the real connection string** to this repo, anywhere,
-  including tauri sidecar env vars in `app/src-tauri/src/main.rs` (unlike
-  `AETHERIA_DEV_PASSPHRASE`, which is an intentionally-public dev placeholder,
-  this is a real secret). It's scoped receive-only when generated via
-  `create-app --scopes "make_invoice,lookup_invoice,get_info,get_balance"`
-  (no `pay_invoice`) specifically so a leak can't be used to spend funds -
-  but "can't be drained" isn't the same as "safe to publish," so it stays
-  out of version control regardless. How a real shipped installer gets this
-  value into every user's copy (vs. a dev running it locally via env var)
-  is an open question, not yet solved - flagged here rather than guessed at.
-- The actual receiving wallet for this (as of 2026-08-02) is a self-hosted
-  Alby Hub running in Docker (`ghcr.io/getalby/hub:latest`, container name
-  `alby-hub`, port 8080, named volume `albyhub-data`) on **real Bitcoin
-  mainnet** - not a testnet. It's initialized and unlocked (`setup`/`start
-  --save` already run), but has **zero Lightning channels/liquidity** as of
-  this writing (JIT channels are enabled though, so the first real payment
-  it ever receives would open one automatically, fee deducted from that
-  payment - see the hub's own `jit-channels.md` reference if the
-  `getAlby/hub-skill` skill is installed).
-- **Verified 2026-08-02, zero real money involved**: built and ran the
-  actual `aetheria-delegate` binary with `AETHERIA_PLATFORM_FEE_NWC` pointed
-  at a mock NIP-47 wallet (`delegate/examples/mock_nwc_wallet.rs`, real
-  relay + real NIP-04 encryption, fake Lightning backend - same harness the
-  NWC agent built for the main flow), drove a real `subscribe` IPC call:
-  - Fee wallet ≠ reader wallet (two independent mock wallet processes): fee
-    invoice creation succeeded, but paying it failed (`NotFound - unknown
-    invoice`) - each mock wallet only recognizes invoices *it* created, an
-    artifact of the two-independent-fake-ledgers test harness, not a real
-    Lightning limitation (real bolt11 invoices are payable by any wallet
-    that can route to them). Confirms the important thing: this failure did
-    **not** block the main subscription - `network_synced: true`, a real
-    preimage, full access granted; only `platform_fee_synced: false`.
-  - Fee wallet = reader wallet (same mock wallet playing both roles, same
-    "single identity plays multiple roles" convention already used for the
-    main flow, see `nwc.rs`'s module docs): full success,
-    `platform_fee_synced: true`, `platform_fee_error: null`, main
-    subscription unaffected.
+- **Contracts**: `subscriber-registry-contract` crate deleted;
+  `AccessTier`/`Tier`/`EncryptedKeyBundle` removed from `aetheria-types`;
+  `PostMetadataHeader`/`GlobalDirectoryEntry` no longer carry `access_level`/
+  `epoch_id`; `EncryptedPostPayload` renamed to `PostPayload` (plain
+  `content: Vec<u8>`, no `nonce`/`auth_tag` - every post is public now, so
+  there's no plaintext-vs-ciphertext distinction to encode). **All four
+  remaining contracts were rebuilt with `fdev build`, so their code hashes
+  changed** - this is a real, unavoidable consequence: every contract
+  instance key derives from `(code, params)`, so this machine's
+  previously-published `PublisherProfileContract`/`ContentIndexContract`/
+  `PostDataContract`/`GlobalDirectoryContract` instances (all the keys this
+  file documented earlier) are now unreachable under the new code. The next
+  publish mints fresh instances at new keys; nothing tries to migrate the old
+  ones.
+- **Delegate**: `crypto.rs` (ECDH/epoch-key AES-GCM), `nwc.rs` (NIP-47
+  client), `subscriber_registry_e2e_test.rs`, and `examples/`
+  (`mock_nwc_wallet.rs`, `nwc_protocol_check.rs`) all deleted outright.
+  `contracts.rs` lost `subscriber_registry_key_for`/`ensure_subscriber_registry`/
+  `publish_key_bundle_to_network`/`fetch_key_bundle`. `ipc.rs` lost
+  `ConnectWallet`/`GetSubscriptionInfo`/`Subscribe`/`ListSubscribers` and the
+  `access` field on `PublishPost`; every feed handler's `locked`/
+  `access_level`/`epoch_id` fields are gone (every post is just public now).
+  `db.rs` lost the `epoch_keys`/`subscribers` tables and their columns on
+  `posts`/`cached_remote_posts`. `nwc`/`nostr-sdk` dropped from
+  `Cargo.toml`; `hkdf`/`sha2` too (only `crypto.rs` used them). `k256`/
+  `aes-gcm` stay - `keys.rs`'s on-disk encrypted-identity format still
+  includes a (now otherwise-unused) secp256k1 key, kept rather than forcing
+  a breaking migration of this machine's real identity file for no benefit
+  (see `keys.rs`'s module docs).
+- **Frontend**: `SubscriberPortal.tsx` and `Subscriptions.tsx` deleted;
+  Sidebar's Subscribers/Subscriptions nav entries gone. `Editor.tsx` lost the
+  public/subscriber-only toggle - publishing is just title/summary/markdown
+  now. `FeedItemsList.tsx`/`RightRail.tsx` lost their lock-badge rendering.
+  Since a publisher's pubkey used to be shown on the now-deleted Subscribers
+  tab (needed so someone else can paste it into Following), `Profile.tsx`
+  gained that display instead (`ipc.rs`'s `handle_get_profile` now returns
+  `author_pubkey`) - `Following.tsx`'s instructional text was updated to
+  point there.
+- **Local SQLite**: schema changed (see above) but existing on-disk dev
+  databases are **not** migrated - this is genuinely dev-only data on a
+  single-user machine, and writing a migration for columns nothing reads
+  anymore isn't worth it. A fresh `aetheria.sqlite` (delete
+  `%APPDATA%\aetheria\aetheria-delegate\data\aetheria.sqlite`) is the clean
+  path if the old schema's leftover `NOT NULL` columns ever cause an insert
+  to fail.
+- **Verified**: `cargo check`/`cargo test --lib` clean across both
+  `contracts/` and `delegate/` (16 non-network tests passing, 4 correctly
+  `#[ignore]`d), `cargo build --release` clean, `npx tsc -b` clean, and all
+  four contracts rebuilt via `fdev build`. The website (`website/`) was
+  updated in the same pass to drop every payment/subscription mention - see
+  that directory's own history/CLAUDE.md.
 
 ## Following other publishers + merged Home/Following feeds (as of 2026-08-02)
 
@@ -897,13 +801,13 @@ followed merge degenerated to just your own posts. Redesigned as:
   button - the more common way to follow someone now, vs. Following's
   paste-a-pubkey box (kept for the case where you don't have a post of
   theirs to click yet).
-- **Subscribers vs. Subscriptions** - split what used to be one dual-purpose
-  `SubscriberPortal.tsx` into two: `SubscriberPortal.tsx` ("Subscribers") is
-  now publisher-side only (your tiers, read-only; your subscribers; your
-  key) - the wallet-connect-and-pay UI didn't belong on your own dashboard.
-  `Subscriptions.tsx` ("Subscriptions", new) is reader-side: wallet connect,
-  plus a real "Subscribe" button for every publisher you follow. See below
-  for why that button (correctly) always errors today.
+- **Subscribers vs. Subscriptions** - this originally split a dual-purpose
+  `SubscriberPortal.tsx` into a publisher-side "Subscribers" tab and a
+  reader-side "Subscriptions" tab. Both tabs, and the wallet-connect/pay UI
+  behind them, were deleted when payments/subscriptions were removed (see
+  "Payments and subscriptions removed" above) - a publisher's own pubkey
+  (needed so others can paste it into Following) now lives on the Profile
+  tab instead.
 
 ### GlobalDirectoryContract - the "everyone" list
 
@@ -1435,37 +1339,9 @@ All 16 non-network delegate unit tests pass, `tsc` is clean, and
 
 ## Known stub / unimplemented areas
 
-- Per-post subscription tier is hardcoded to `required_tier_id: 0`
-  (`ipc.rs`'s `handle_publish_post`) — the UI doesn't expose multiple tiers
-  yet, and neither does the fresh `PublisherProfile` the delegate publishes
-  on first run (`subscription_tiers: vec![]`, `title: "Untitled Publication"`).
-- Real Lightning payment settlement against a funded wallet - see the NWC
-  section above; everything up to and including the protocol/network layer
-  is verified, real money movement is not.
-- **Reading a `SubscriberOnly` post from a publisher other than this
-  delegate's own identity.** Decrypting it needs the ECDH shared secret,
-  which needs that publisher's **secp256k1** identity public key
-  (`identity_public_compressed()` - a completely different keypair from the
-  Ed25519 `author_pubkey` this file's Following feature derives contract keys
-  from). There is no mechanism yet for a reader to learn a stranger's
-  secp256k1 pubkey - `subscriber_registry_e2e_test.rs`'s own module docs say
-  so explicitly: in production it would arrive "via the peer-message channel
-  design doc §5.2 step 2 describes", which isn't built. Deliberately not
-  solved by this pass, and deliberately not worked around: `ipc.rs`'s
-  `get_remote_post` refuses outright (checks the fetched payload's nonce
-  independently, doesn't trust the caller) rather than attempting a decrypt
-  that can only fail, and the UI renders these posts locked with a disabled
-  open button instead of a broken "open" action. `contracts::fetch_key_bundle`
-  is real, tested, and ready for the day this channel exists; nothing calls
-  it from the Following path yet.
-- Subscribing (paying via NWC) to a publication other than this delegate's
-  own identity - **has a real UI now** (`Subscriptions.tsx`, see the "Home,
-  Latest feed" section below), but every target other than yourself rejects
-  immediately with a clear error (`handle_subscribe` in `ipc.rs`) rather than
-  attempting anything, for the same underlying reason as the bullet above:
-  no channel exists for a reader to learn a stranger's secp256k1 key. Real,
-  scoped-down-on-purpose (see that section for the decision), not a silent
-  gap.
+- Payments/subscriptions are not a stub - they were built, verified live,
+  and then deliberately removed (see "Payments and subscriptions removed"
+  above). Every post is public; there is no reader-side access gap to close.
 - Proof-of-work spam mitigation (design doc §7) and the pinning daemon
   (§7, §8 Phase 4) are not started. The Latest feed's 1000-entry cap (see
-  below) is the closest thing to spam mitigation any part of this app has.
+  above) is the closest thing to spam mitigation any part of this app has.

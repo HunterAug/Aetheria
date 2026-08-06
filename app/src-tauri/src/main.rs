@@ -1,6 +1,6 @@
-// The desktop shell only renders the UI; all crypto, key storage, and
-// Freenet/NWC networking lives in the separate `aetheria-delegate` daemon
-// (see delegate/), which the UI talks to over a loopback WebSocket
+// The desktop shell only renders the UI; all key storage and Freenet
+// networking lives in the separate `aetheria-delegate` daemon (see
+// delegate/), which the UI talks to over a loopback WebSocket
 // (ws://127.0.0.1:47021, see app/src/lib/delegate.ts).
 //
 // This process is responsible for three things beyond rendering:

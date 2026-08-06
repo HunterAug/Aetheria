@@ -73,7 +73,7 @@ jobs:
       # just the original dev machine - same workaround applies here.
       - name: Build contract WASM (skipped if cache hit)
         run: |
-          for contract in post-data-contract content-index-contract publisher-profile-contract subscriber-registry-contract global-directory-contract; do
+          for contract in post-data-contract content-index-contract publisher-profile-contract global-directory-contract; do
             if [ ! -f "contracts/$contract/build/freenet/${contract//-/_}" ]; then
               echo "==> fdev build $contract"
               (cd "contracts/$contract" && CARGO_TARGET_DIR=./target fdev build)

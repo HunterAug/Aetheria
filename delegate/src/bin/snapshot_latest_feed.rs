@@ -5,12 +5,8 @@
 //! scripts" section and `website/`'s own docs for how the snapshot gets
 //! from here into the deployed site.
 //!
-//! A `SubscriberOnly` entry's `title`/`summary` are unencrypted metadata
-//! (same convention the app itself uses for locked teasers) - this never
-//! sees, let alone outputs, actual post content, encrypted or not. Every
-//! subscriber-only entry is reported `locked: true` unconditionally: unlike
-//! the real app (which unlocks a viewer's own posts), this tool has no
-//! identity of its own, so nothing it shows is ever "mine".
+//! Every post is public - this never sees, let alone outputs, anything
+//! access-restricted.
 //!
 //! Run (from `delegate/`): `cargo run --release --bin snapshot-latest-feed > out.json`
 //! against a real reachable Freenet node (`FreenetBridge::connect_local`'s
@@ -35,8 +31,6 @@ struct SnapshotEntry {
     title: String,
     summary: String,
     post_contract_id: String,
-    access_level: &'static str,
-    locked: bool,
     published_at: u64,
 }
 
@@ -47,22 +41,14 @@ async fn main() -> Result<()> {
 
     let mut out: Vec<SnapshotEntry> = entries
         .into_iter()
-        .map(|e| {
-            let (access_level, locked) = match e.access_level {
-                aetheria_types::AccessTier::Public => ("public", false),
-                aetheria_types::AccessTier::SubscriberOnly { .. } => ("subscriber", true),
-            };
-            SnapshotEntry {
-                post_id: hex_encode(&e.post_id),
-                author_pubkey: hex_encode(&e.author_pubkey),
-                author_display_name: e.author_display_name,
-                title: e.title,
-                summary: e.summary,
-                post_contract_id: e.post_contract_id,
-                access_level,
-                locked,
-                published_at: e.published_at,
-            }
+        .map(|e| SnapshotEntry {
+            post_id: hex_encode(&e.post_id),
+            author_pubkey: hex_encode(&e.author_pubkey),
+            author_display_name: e.author_display_name,
+            title: e.title,
+            summary: e.summary,
+            post_contract_id: e.post_contract_id,
+            published_at: e.published_at,
         })
         .collect();
     out.sort_by(|a, b| b.published_at.cmp(&a.published_at));

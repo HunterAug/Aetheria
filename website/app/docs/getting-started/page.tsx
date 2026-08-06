@@ -50,21 +50,10 @@ export default function GettingStarted() {
         3. Write your first post
       </h2>
       <p className="text-neutral-400 leading-relaxed">
-        Open the <strong className="text-neutral-300">Draft</strong> tab,
-        write in Markdown, and choose who can read it:
+        Open the <strong className="text-neutral-300">Draft</strong> tab and
+        write in Markdown. Every post is public. Anyone on the network can
+        read it, no account or subscription needed on their end.
       </p>
-      <ul className="mt-3 space-y-2 text-neutral-400 list-disc list-inside">
-        <li>
-          <strong className="text-neutral-300">Public</strong>: anyone can
-          read it, no subscription needed.
-        </li>
-        <li>
-          <strong className="text-neutral-300">Subscriber-only</strong>:
-          encrypted; only people who&apos;ve paid to subscribe to you can
-          decrypt it. Everyone else still sees the title and summary, as a
-          teaser.
-        </li>
-      </ul>
       <p className="text-neutral-400 leading-relaxed mt-3">
         Publishing sends your post to the Freenet network, where it&apos;s
         stored redundantly across many peers instead of one server.
@@ -89,25 +78,6 @@ export default function GettingStarted() {
         opened) to see their profile and a Follow button. You can also
         paste a publisher&apos;s public key directly on the Following tab if
         you know it but haven&apos;t seen a post of theirs yet.
-      </p>
-
-      <h2 className="text-xl font-semibold text-neutral-100 mt-10 mb-3">
-        6. Subscribing
-      </h2>
-      <p className="text-neutral-400 leading-relaxed">
-        Aetheria supports paid subscriptions over the Lightning Network via
-        Nostr Wallet Connect. Connect a Lightning wallet on the
-        Subscriptions tab and payment goes directly from your wallet to the
-        publisher&apos;s, with no platform in between.
-      </p>
-      <p className="text-neutral-400 leading-relaxed mt-3">
-        <strong className="text-neutral-300">Current limitation:</strong>{" "}
-        subscribing only works for testing against your own publication
-        right now. Subscribing to someone else isn&apos;t supported yet. It
-        needs a secure way for your app to learn that publisher&apos;s
-        encryption key, which hasn&apos;t been built. You&apos;ll get a clear
-        error if you try, not a silent failure or a charge with nothing to
-        show for it.
       </p>
     </article>
   );

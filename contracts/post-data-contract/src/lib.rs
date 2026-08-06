@@ -1,13 +1,12 @@
 //! `PostDataContract` — Layer 3 Freenet WASM contract.
 //!
-//! Holds a single article's markdown payload. Public posts are stored as
-//! plaintext bytes inside `cipher_text` with an all-zero nonce/tag; subscriber
-//! posts are AES-256-GCM ciphertext produced by the publisher's Delegate. The
-//! contract is write-once: once a payload is set it cannot be replaced,
-//! matching the append-only publication model described in
+//! Holds a single article's markdown payload. Every post is public, so
+//! `content` is plain bytes - no encryption. The contract is write-once:
+//! once a payload is set it cannot be replaced, matching the append-only
+//! publication model described in
 //! `docs/Decentralized_Substack_Design_Doc.pdf` section 3.3.
 
-use aetheria_types::EncryptedPostPayload;
+use aetheria_types::PostPayload;
 use freenet_stdlib::prelude::*;
 
 struct PostDataContract;
@@ -19,10 +18,10 @@ impl ContractInterface for PostDataContract {
         state: State<'static>,
         _related: RelatedContracts<'static>,
     ) -> Result<ValidateResult, ContractError> {
-        let payload: EncryptedPostPayload = ciborium::from_reader(state.as_ref())
+        let payload: PostPayload = ciborium::from_reader(state.as_ref())
             .map_err(|e| ContractError::Deser(e.to_string()))?;
 
-        if payload.cipher_text.is_empty() {
+        if payload.content.is_empty() {
             return Ok(ValidateResult::Invalid);
         }
         Ok(ValidateResult::Valid)
@@ -34,14 +33,14 @@ impl ContractInterface for PostDataContract {
         data: Vec<UpdateData<'static>>,
     ) -> Result<UpdateModification<'static>, ContractError> {
         // Write-once: an already-populated payload cannot be overwritten.
-        let existing: Option<EncryptedPostPayload> = ciborium::from_reader(state.as_ref()).ok();
+        let existing: Option<PostPayload> = ciborium::from_reader(state.as_ref()).ok();
         if existing.is_some() {
             return Ok(UpdateModification::valid(state));
         }
 
         for update in data {
             if let UpdateData::State(s) = update {
-                let payload: EncryptedPostPayload = ciborium::from_reader(s.as_ref())
+                let payload: PostPayload = ciborium::from_reader(s.as_ref())
                     .map_err(|e| ContractError::Deser(e.to_string()))?;
                 let mut buf = Vec::new();
                 ciborium::into_writer(&payload, &mut buf)

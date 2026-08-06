@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { SearchIcon, LockIcon } from "./icons";
+import { SearchIcon } from "./icons";
 import { delegate, type FeedItem, type OpenedPost } from "../lib/delegate";
 import { openFeedItem } from "../lib/feedItem";
 import NetworkStatusPanel from "./NetworkStatusPanel";
@@ -100,7 +100,6 @@ export default function RightRail({
   }, []);
 
   async function selectPost(item: FeedItem) {
-    if (item.locked) return;
     setOpeningPostId(item.post_id);
     setError(null);
     try {
@@ -169,16 +168,10 @@ export default function RightRail({
                   <button
                     key={`${item.author_pubkey}-${item.post_id}`}
                     onClick={() => selectPost(item)}
-                    disabled={item.locked || openingPostId === item.post_id}
-                    title={item.locked ? "Subscriber-only post - can't be opened yet" : undefined}
+                    disabled={openingPostId === item.post_id}
                     className="w-full text-left px-4 py-2 hover:bg-ink-800 disabled:cursor-not-allowed"
                   >
-                    <p
-                      className={`text-sm truncate flex items-center gap-1 ${
-                        item.locked ? "text-neutral-500" : "text-neutral-200"
-                      }`}
-                    >
-                      {item.locked && <LockIcon className="w-3 h-3 shrink-0" />}
+                    <p className="text-sm truncate flex items-center gap-1 text-neutral-200">
                       {item.title}
                       {openingPostId === item.post_id && (
                         <span className="text-neutral-500">opening…</span>

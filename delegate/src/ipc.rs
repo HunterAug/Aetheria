@@ -1,12 +1,11 @@
 //! Local IPC server: the React/Tauri UI talks to the Delegate over a
-//! loopback-only WebSocket so key material and ciphertext never cross a
-//! process boundary the UI can inspect directly.
+//! loopback-only WebSocket so key material never crosses a process boundary
+//! the UI can inspect directly.
 //!
 //! Protocol: newline-agnostic JSON request/response pairs correlated by
-//! `id`. This is a Phase 2 prototype covering only the publisher's own
-//! publish -> feed -> read loop entirely against the local SQLite cache;
-//! there is no Freenet broadcast or subscriber decryption yet (see
-//! `freenet_bridge.rs` and `nwc.rs`).
+//! `id`. Aetheria has no payments or subscriptions - every post is public,
+//! so publishing is just "save locally, then sync to the real Freenet
+//! network" (see `freenet_bridge.rs`).
 //!
 //! ## Locked/unlocked startup (as of 2026-08-02)
 //!
@@ -34,11 +33,9 @@
 
 use crate::{
     contracts::{self, PublisherIdentity},
-    crypto,
     db::LocalStore,
     freenet_bridge::FreenetBridge,
     keys::DelegateKeys,
-    nwc::NwcClient,
     watcher::{self, EventSender, WatcherHandle},
 };
 use anyhow::{Context, Result};
@@ -50,7 +47,7 @@ use std::collections::HashSet;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
@@ -83,8 +80,6 @@ enum Request {
         title: String,
         summary: String,
         markdown: String,
-        /// "public" or "subscriber".
-        access: String,
     },
     GetProfile,
     UpdateProfile {
@@ -95,48 +90,6 @@ enum Request {
         #[serde(default)]
         avatar_data_url: Option<String>,
     },
-    /// Connect this delegate's Lightning wallet via Nostr Wallet Connect
-    /// (NIP-47) - a `nostr+walletconnect://...` URI exported from a wallet
-    /// such as Alby, Mutiny, Phoenix, or Umbrel. One wallet connection
-    /// serves both roles `Subscribe` needs (see `nwc.rs`'s module docs):
-    /// receiving payment (as a publisher) and paying (as a reader).
-    ConnectWallet {
-        uri: String,
-    },
-    /// `author_pubkey`'s subscription tiers, this delegate's own
-    /// subscriber-role pubkey (what a bundle addressed to "you" would be
-    /// keyed on), whether a wallet is currently connected, and whether
-    /// `author_pubkey` is actually subscribable right now - everything
-    /// `Subscriptions.tsx` needs to render before a reader clicks Subscribe.
-    /// Omitted (or equal to this delegate's own pubkey) means "myself" -
-    /// always `subscribable: true` and unchanged from before this field
-    /// existed. Any other target is real (profile-fetched where possible)
-    /// but always `subscribable: false` - see `Subscribe`'s docs for why.
-    GetSubscriptionInfo {
-        #[serde(default)]
-        author_pubkey: Option<String>,
-    },
-    /// Reader-role action: pay for `tier_id` via the connected wallet, then
-    /// (publisher-role, same delegate - see this milestone's single-identity
-    /// note in CLAUDE.md) verify settlement, derive the ECDH shared secret,
-    /// and append a fresh `EncryptedKeyBundle` to the `SubscriberRegistryContract`.
-    /// `author_pubkey` omitted (or equal to this delegate's own pubkey) is
-    /// the only target that actually works today - anything else fails
-    /// immediately with a clear error, since there's no channel yet for a
-    /// reader to learn a stranger's secp256k1 identity key (needed for the
-    /// ECDH exchange) - see CLAUDE.md's "Known stub" section. Deliberately a
-    /// real, explicit `Err` here rather than a silently-ignored or
-    /// fake-succeeding target, matching this codebase's honest-gap
-    /// convention.
-    Subscribe {
-        tier_id: u8,
-        #[serde(default)]
-        author_pubkey: Option<String>,
-    },
-    /// Publisher-role view: subscriber grants this delegate has issued,
-    /// from the local bookkeeping table (`LocalStore::record_subscriber`) -
-    /// not a live network re-fetch of the registry contract.
-    ListSubscribers,
     /// Reader-role action: fetches `author_pubkey`'s real, signed
     /// `PublisherProfileContract` off the network to validate they actually
     /// exist before saving anything locally (see
@@ -165,21 +118,15 @@ enum Request {
     GetPublisherProfile {
         author_pubkey: String,
     },
-    /// Fetches and decodes a `Public` post from *another* publisher by its
-    /// `PostDataContract` id. Refuses (rather than silently failing to
-    /// decrypt) if the fetched payload turns out to be `SubscriberOnly` -
-    /// see `contracts::fetch_remote_post_payload`'s module docs on why that
-    /// gap is deliberate for this milestone.
+    /// Fetches and decodes a post from *another* publisher by its
+    /// `PostDataContract` id.
     GetRemotePost {
         post_contract_id: String,
     },
     /// Fetches an avatar image (this delegate's own, or any other
     /// publisher's whose key it already knows via a feed item / profile) by
     /// its `PostDataContract` id and returns it as a `data:` URL ready to
-    /// drop into an `<img src>` - see `handle_get_remote_avatar`. Avatars are
-    /// published as `Public`-access posts (see `contracts::publish_avatar_to_network`),
-    /// so this is answerable for *any* publisher, unlike `GetRemotePost`'s
-    /// subscriber-access restriction.
+    /// drop into an `<img src>` - see `handle_get_remote_avatar`.
     GetRemoteAvatar {
         avatar_freenet_key: String,
     },
@@ -224,7 +171,6 @@ struct Response<'a> {
 struct Unlocked {
     keys: DelegateKeys,
     freenet: FreenetBridge,
-    nwc: NwcClient,
     identity: PublisherIdentity,
     /// The live "someone you follow just published" watcher (`watcher.rs`),
     /// started once per unlock. Held here so `follow_publisher`/
@@ -233,11 +179,6 @@ struct Unlocked {
     /// `Delegate` (it shares only the `LocalStore` behind an `Arc`), so it
     /// can't deadlock against an in-flight IPC request.
     watcher: WatcherHandle,
-    /// Optional 2% platform fee wallet (design doc §6.3) - disconnected
-    /// unless `AETHERIA_PLATFORM_FEE_NWC` was set at startup (see
-    /// `connect_platform_fee_wallet`). `handle_subscribe` checks
-    /// `is_connected()` before doing anything with it.
-    platform_fee: NwcClient,
 }
 
 struct Delegate {
@@ -265,11 +206,6 @@ impl Delegate {
             .expect("Delegate::unlocked() called while locked - dispatch gate should have refused this")
     }
 
-    fn unlocked_mut(&mut self) -> &mut Unlocked {
-        self.unlocked
-            .as_mut()
-            .expect("Delegate::unlocked_mut() called while locked - dispatch gate should have refused this")
-    }
 }
 
 /// How many server-push events can be buffered per connected UI before the
@@ -426,8 +362,6 @@ async fn finish_unlock(delegate: &mut Delegate, keys: DelegateKeys) -> Result<()
         publisher_profile = %identity.profile_key.encoded_contract_id(),
         "Freenet publisher identity ready"
     );
-    let nwc = NwcClient::disconnected();
-    let platform_fee = connect_platform_fee_wallet().await;
     // Started here rather than in `serve()` because there is no followed-
     // publisher list to watch (and no Freenet identity at all) until an
     // identity is actually unlocked. It opens its own connection to the node
@@ -437,43 +371,10 @@ async fn finish_unlock(delegate: &mut Delegate, keys: DelegateKeys) -> Result<()
     delegate.unlocked = Some(Unlocked {
         keys,
         freenet,
-        nwc,
         identity,
-        platform_fee,
         watcher,
     });
     Ok(())
-}
-
-/// Optional 2% platform fee (design doc §6.3's "Optional App Split"): if
-/// `AETHERIA_PLATFORM_FEE_NWC` is set to a real `nostr+walletconnect://...`
-/// URI, `handle_subscribe` requests a small fee invoice from this wallet
-/// alongside the main subscription payment, best-effort. Unset by default -
-/// a fork of this app run by someone else shouldn't silently try to pay a
-/// stranger's wallet. **Never hardcode a real connection string here or
-/// anywhere else in this repo** - it's a real secret (scoped receive-only:
-/// make_invoice/lookup_invoice/get_info/get_balance, no pay_invoice, so even
-/// a leaked string can't be used to spend funds, but it's still not
-/// something to commit to git history). Moved here from `main.rs` as part of
-/// the locked/unlocked startup split - this now runs once per successful
-/// unlock rather than once at process start.
-async fn connect_platform_fee_wallet() -> NwcClient {
-    let mut client = NwcClient::disconnected();
-    match std::env::var("AETHERIA_PLATFORM_FEE_NWC") {
-        Ok(uri) if !uri.trim().is_empty() => match client.connect(&uri).await {
-            Ok(()) => {
-                tracing::info!("platform fee wallet connected - 2% subscription split enabled");
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "AETHERIA_PLATFORM_FEE_NWC is set but failed to connect - platform fee split disabled this run"
-                );
-            }
-        },
-        _ => {}
-    }
-    client
 }
 
 /// First run (no identity file yet) creates a fresh identity under
@@ -598,7 +499,7 @@ async fn handle_message(delegate: &Arc<Mutex<Delegate>>, text: &str) -> String {
 /// Dispatch gate: `Unlock` is the only request handled while locked; every
 /// other request is refused with a clear, retryable error instead of being
 /// dispatched at all - so every handler below can assume `delegate.unlocked`
-/// is `Some` (see `Delegate::unlocked()`/`unlocked_mut()`).
+/// is `Some` (see `Delegate::unlocked()`).
 async fn handle_request(delegate: &mut Delegate, request: Request) -> Result<serde_json::Value> {
     match request {
         Request::Unlock { passphrase } => handle_unlock(delegate, &passphrase).await,
@@ -622,8 +523,7 @@ async fn handle_request(delegate: &mut Delegate, request: Request) -> Result<ser
                     title,
                     summary,
                     markdown,
-                    access,
-                } => handle_publish_post(delegate, &title, &summary, &markdown, &access).await,
+                } => handle_publish_post(delegate, &title, &summary, &markdown).await,
                 Request::GetProfile => handle_get_profile(delegate),
                 Request::UpdateProfile {
                     display_name,
@@ -633,14 +533,6 @@ async fn handle_request(delegate: &mut Delegate, request: Request) -> Result<ser
                     handle_update_profile(delegate, &display_name, &bio, avatar_data_url.as_deref())
                         .await
                 }
-                Request::ConnectWallet { uri } => handle_connect_wallet(delegate, &uri).await,
-                Request::GetSubscriptionInfo { author_pubkey } => {
-                    handle_get_subscription_info(delegate, author_pubkey.as_deref())
-                }
-                Request::Subscribe { tier_id, author_pubkey } => {
-                    handle_subscribe(delegate, tier_id, author_pubkey.as_deref()).await
-                }
-                Request::ListSubscribers => handle_list_subscribers(delegate),
                 Request::FollowPublisher { author_pubkey } => {
                     handle_follow_publisher(delegate, &author_pubkey).await
                 }
@@ -679,8 +571,6 @@ fn handle_list_posts(delegate: &Delegate) -> Result<serde_json::Value> {
                 "post_id": hex::encode(p.post_id),
                 "title": p.title,
                 "summary": p.summary,
-                "access_level": p.access_level,
-                "epoch_id": p.epoch_id,
                 "published_at": p.published_at,
                 "network_synced": p.post_contract_id.is_some(),
                 "post_contract_id": p.post_contract_id,
@@ -697,33 +587,10 @@ fn handle_get_post(delegate: &Delegate, post_id_hex: &str) -> Result<serde_json:
         .get_post(&post_id)?
         .ok_or_else(|| anyhow::anyhow!("post not found"))?;
 
-    let markdown = match row.access_level.as_str() {
-        "public" => row
-            .markdown_plain
-            .ok_or_else(|| anyhow::anyhow!("public post missing plaintext"))?,
-        "subscriber" => {
-            let key = delegate
-                .db
-                .get_epoch_key(row.epoch_id)?
-                .ok_or_else(|| anyhow::anyhow!("epoch key not available locally"))?;
-            let cipher_text = row
-                .cipher_text
-                .ok_or_else(|| anyhow::anyhow!("subscriber post missing ciphertext"))?;
-            let nonce: [u8; 12] = row
-                .nonce
-                .ok_or_else(|| anyhow::anyhow!("subscriber post missing nonce"))?
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("corrupt nonce length"))?;
-            let bytes = crypto::decrypt_payload(&key, &nonce, &cipher_text)?;
-            String::from_utf8(bytes)?
-        }
-        other => anyhow::bail!("unknown access_level {other}"),
-    };
-
     Ok(serde_json::json!({
         "post_id": post_id_hex,
         "title": row.title,
-        "markdown": markdown,
+        "markdown": row.markdown,
         "network_synced": row.post_contract_id.is_some(),
         "post_contract_id": row.post_contract_id,
     }))
@@ -734,62 +601,15 @@ async fn handle_publish_post(
     title: &str,
     summary: &str,
     markdown: &str,
-    access: &str,
 ) -> Result<serde_json::Value> {
-    anyhow::ensure!(
-        access == "public" || access == "subscriber",
-        "access must be \"public\" or \"subscriber\""
-    );
-
     let mut post_id = [0u8; 16];
     rand::rngs::OsRng.fill_bytes(&mut post_id);
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    let epoch_id = current_epoch_id(now);
 
     // Local SQLite write stays exactly as it was before Freenet was wired
     // up - it's the fast local cache `list_posts`/`get_post` read from, and
-    // must keep working even though publishing now also reaches the
-    // network. `access_tier`/`network_cipher_text`/`network_nonce` are the
-    // extra pieces the network side needs alongside what's already stored.
-    let (access_tier, network_cipher_text, network_nonce) = if access == "public" {
-        delegate.db.insert_post(
-            &post_id,
-            title,
-            summary,
-            access,
-            epoch_id,
-            now,
-            Some(markdown),
-            None,
-            None,
-        )?;
-        // Matches PostDataContract's own convention for public posts: plain
-        // bytes in `cipher_text`, all-zero nonce (see its module docs).
-        (aetheria_types::AccessTier::Public, markdown.as_bytes().to_vec(), [0u8; 12])
-    } else {
-        let key = delegate
-            .db
-            .get_or_create_epoch_key(epoch_id, crypto::generate_epoch_key, now)?;
-        let encrypted = crypto::encrypt_payload(&key, markdown.as_bytes())?;
-        delegate.db.insert_post(
-            &post_id,
-            title,
-            summary,
-            access,
-            epoch_id,
-            now,
-            None,
-            Some(&encrypted.cipher_text),
-            Some(&encrypted.nonce),
-        )?;
-        // TODO(Phase 3): real tier selection once the UI exposes more than
-        // one subscription tier (design doc §3.1) - defaults to tier 0.
-        (
-            aetheria_types::AccessTier::SubscriberOnly { required_tier_id: 0 },
-            encrypted.cipher_text,
-            encrypted.nonce,
-        )
-    };
+    // must keep working even though publishing now also reaches the network.
+    delegate.db.insert_post(&post_id, title, summary, now, markdown)?;
 
     // The local SQLite write above already committed - this post is real
     // and already in the local feed (`list_posts`/`get_post` will show it)
@@ -812,11 +632,8 @@ async fn handle_publish_post(
         post_id,
         title,
         summary,
-        access_tier.clone(),
-        epoch_id,
         now,
-        network_cipher_text,
-        network_nonce,
+        markdown.as_bytes().to_vec(),
     )
     .await
     {
@@ -848,8 +665,6 @@ async fn handle_publish_post(
             title,
             summary,
             contract_id.clone(),
-            access_tier,
-            epoch_id,
             now,
         )
         .await
@@ -885,6 +700,11 @@ fn own_display_name(delegate: &Delegate) -> Result<String> {
 
 fn handle_get_profile(delegate: &Delegate) -> Result<serde_json::Value> {
     let avatar_freenet_key = contracts::known_avatar_key(&delegate.db)?;
+    // Every other publisher has to be followed by pasting this hex pubkey
+    // (see `Following.tsx`) - it needs to be shown *somewhere* in the UI so
+    // a publisher can actually hand it to someone, and Profile is the only
+    // screen showing this delegate's own identity.
+    let author_pubkey = hex::encode(delegate.unlocked().keys.master_signing_verifying_bytes());
     match delegate.db.get_profile()? {
         Some(p) => Ok(serde_json::json!({
             "display_name": p.display_name,
@@ -894,6 +714,7 @@ fn handle_get_profile(delegate: &Delegate) -> Result<serde_json::Value> {
                 _ => None,
             },
             "avatar_freenet_key": avatar_freenet_key,
+            "author_pubkey": author_pubkey,
         })),
         // No local row yet (fresh install, Settings never saved) - blank on
         // purpose, matching the blank title `ensure_publisher_identity`
@@ -905,6 +726,7 @@ fn handle_get_profile(delegate: &Delegate) -> Result<serde_json::Value> {
             "bio": "",
             "avatar_data_url": null,
             "avatar_freenet_key": avatar_freenet_key,
+            "author_pubkey": author_pubkey,
         })),
     }
 }
@@ -1002,266 +824,6 @@ async fn handle_update_profile(
     }))
 }
 
-/// Single hardcoded subscription tier, per this task's scope note: real
-/// multi-tier configuration in Settings is a TODO, not required for this
-/// milestone - see CLAUDE.md's "Known stub" section.
-fn default_tiers() -> Vec<aetheria_types::Tier> {
-    vec![aetheria_types::Tier {
-        tier_id: 0,
-        name: "Supporter".to_string(),
-        price_sats_per_month: 5_000,
-        features: vec!["Full access to subscriber-only posts".to_string()],
-    }]
-}
-
-async fn handle_connect_wallet(delegate: &mut Delegate, uri: &str) -> Result<serde_json::Value> {
-    delegate.unlocked_mut().nwc.connect(uri).await?;
-    Ok(serde_json::json!({ "connected": true }))
-}
-
-/// `author_pubkey` omitted, or equal to this delegate's own pubkey, means
-/// "myself" - unchanged from before `Subscriptions.tsx` existed. Any other
-/// target reports `subscribable: false` (see `handle_subscribe`'s docs for
-/// why) and an empty tier list - real tier data is never published by any
-/// publisher yet regardless of target (`ensure_publisher_identity` always
-/// publishes `subscription_tiers: vec![]`, see contracts.rs), so there's
-/// nothing honest to show there either way.
-fn handle_get_subscription_info(
-    delegate: &Delegate,
-    author_pubkey: Option<&str>,
-) -> Result<serde_json::Value> {
-    let self_pubkey = delegate.unlocked().keys.master_signing_verifying_bytes();
-    let target: [u8; 32] = match author_pubkey {
-        Some(pubkey_hex) => hex::decode_array(pubkey_hex)?,
-        None => self_pubkey,
-    };
-    let is_self = target == self_pubkey;
-    Ok(serde_json::json!({
-        "publisher_pubkey": hex::encode(target),
-        "subscriber_pubkey": hex::encode(delegate.unlocked().keys.identity_public_compressed()),
-        "tiers": if is_self { default_tiers() } else { Vec::new() },
-        "wallet_connected": delegate.unlocked().nwc.is_connected(),
-        "subscribable": is_self,
-    }))
-}
-
-/// Reader-role action (design doc §5.2, Workflow B) - pays for `tier_id` via
-/// the connected wallet, then (publisher-role - see this milestone's
-/// single-identity note in CLAUDE.md, both roles are the same delegate for
-/// now) verifies settlement and appends a fresh `EncryptedKeyBundle`.
-///
-/// Local-first/network-best-effort still applies to the *registry publish*
-/// step (`contracts::publish_key_bundle_to_network`) - the epoch key and the
-/// local subscriber-grant record are committed unconditionally once payment
-/// is verified, exactly like `handle_publish_post`'s post row and
-/// `handle_update_profile`'s profile row. It does *not* apply to the
-/// Lightning payment itself: `make_invoice`/`pay_invoice`/`wait_for_preimage`
-/// are real money movement (once a real wallet is connected), so a failure
-/// there fails the whole call rather than silently granting free access.
-///
-/// `author_pubkey` omitted, or equal to this delegate's own pubkey, is the
-/// only target this actually supports - subscribing to anyone else fails
-/// immediately, clearly, and with no side effects, because there is
-/// genuinely no channel yet for a reader to learn a stranger's secp256k1
-/// identity key (the ECDH exchange needs it, and `PublisherProfileContract`
-/// only ever carries the unrelated Ed25519 `author_pubkey`). The design
-/// doc's own plan for this (an encrypted peer-to-peer message between
-/// delegates, §5.2 step 2) was never built - see CLAUDE.md's "Known stub"
-/// section. Real `Err`, not a silent no-op or fake success, matching this
-/// codebase's honest-gap convention elsewhere (`FreenetBridge::subscribe`'s
-/// `todo!()`, etc.).
-async fn handle_subscribe(
-    delegate: &Delegate,
-    tier_id: u8,
-    author_pubkey: Option<&str>,
-) -> Result<serde_json::Value> {
-    if let Some(pubkey_hex) = author_pubkey {
-        let target: [u8; 32] = hex::decode_array(pubkey_hex)?;
-        anyhow::ensure!(
-            target == delegate.unlocked().keys.master_signing_verifying_bytes(),
-            "subscribing to another publisher isn't supported yet - there's no way for your \
-             delegate to securely learn their encryption key (see CLAUDE.md's Known stub section)"
-        );
-    }
-
-    let tier = default_tiers()
-        .into_iter()
-        .find(|t| t.tier_id == tier_id)
-        .ok_or_else(|| anyhow::anyhow!("unknown tier_id {tier_id}"))?;
-    anyhow::ensure!(
-        delegate.unlocked().nwc.is_connected(),
-        "connect a Lightning wallet first (Nostr Wallet Connect)"
-    );
-
-    let amount_msat = tier.price_sats_per_month.saturating_mul(1000);
-    let description = format!(
-        "Aetheria Subscription: tier {} ({})",
-        tier.tier_id, tier.name
-    );
-
-    // Publisher role: mint an invoice against the connected wallet.
-    let invoice = delegate
-        .unlocked()
-        .nwc
-        .make_invoice(amount_msat, &description)
-        .await
-        .context("requesting a Lightning invoice via NWC")?;
-
-    // Reader role: pay it, via the *same* connected wallet in this
-    // milestone's single-identity architecture (see nwc.rs's module docs -
-    // a real deployment has two different people each connecting their own
-    // wallet; nothing here assumes they're the same wallet, it just happens
-    // to be true today because there's only one identity to test with).
-    let claimed_preimage = delegate
-        .unlocked()
-        .nwc
-        .pay_invoice(&invoice.bolt11)
-        .await
-        .context("paying the Lightning invoice via NWC")?;
-
-    // Publisher role again: verify settlement independently (design doc
-    // §5.2 step 5) rather than trusting the payer's own claim.
-    let confirmed_preimage = delegate
-        .unlocked()
-        .nwc
-        .wait_for_preimage(&invoice.payment_hash, Duration::from_secs(30), Duration::from_secs(2))
-        .await
-        .context("verifying invoice settlement via NIP-47 lookup_invoice")?;
-    anyhow::ensure!(
-        confirmed_preimage == claimed_preimage,
-        "preimage mismatch between pay_invoice's response and lookup_invoice's - refusing to \
-         grant access"
-    );
-
-    // Optional 2% platform fee (design doc §6.3), best-effort: the reader's
-    // subscription is already paid for and verified above, so a hiccup
-    // collecting this small secondary fee must never block or reverse the
-    // access grant that follows - same "local decision is real regardless
-    // of what a network/secondary side-effect does" philosophy as
-    // everywhere else in this file. Skipped entirely if no platform fee
-    // wallet is configured (see `main.rs::connect_platform_fee_wallet`).
-    let (platform_fee_synced, platform_fee_error) = if delegate.unlocked().platform_fee.is_connected() {
-        const PLATFORM_FEE_BASIS_POINTS: u64 = 200; // 2.00%
-        let fee_amount_msat = amount_msat.saturating_mul(PLATFORM_FEE_BASIS_POINTS) / 10_000;
-        if fee_amount_msat == 0 {
-            (false, Some("tier price too small to produce a nonzero fee".to_string()))
-        } else {
-            match collect_platform_fee(delegate, fee_amount_msat, tier.tier_id).await {
-                Ok(()) => (true, None),
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "platform fee collection failed - subscriber access is unaffected"
-                    );
-                    (false, Some(e.to_string()))
-                }
-            }
-        }
-    } else {
-        (false, None)
-    };
-
-    // ECDH key delivery (crypto.rs, design doc §4.2).
-    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    let epoch_id = current_epoch_id(now);
-    let epoch_key = delegate
-        .db
-        .get_or_create_epoch_key(epoch_id, crypto::generate_epoch_key, now)?;
-
-    let subscriber_pubkey = delegate.unlocked().keys.identity_public_compressed();
-    let subscriber_public = k256::PublicKey::from_sec1_bytes(&subscriber_pubkey)
-        .context("decoding own compressed secp256k1 pubkey")?;
-    let shared_secret =
-        crypto::derive_shared_secret(&delegate.unlocked().keys.identity_secret, &subscriber_public);
-    let wrapped = crypto::wrap_epoch_key(&shared_secret, &epoch_key)?;
-
-    let bundle = aetheria_types::EncryptedKeyBundle {
-        subscriber_pubkey,
-        epoch_id,
-        cipher_text: wrapped.cipher_text,
-        nonce: wrapped.nonce,
-        auth_tag: [0u8; 16],
-        issued_at: now,
-    };
-
-    // Local write commits unconditionally, same philosophy as every other
-    // handler in this file - the delegate already decided to grant access
-    // (payment verified above), that's real regardless of what the network
-    // publish below does.
-    delegate
-        .db
-        .record_subscriber(&bundle.subscriber_pubkey, epoch_id, now)?;
-
-    let (registry_synced, network_error) =
-        match contracts::publish_key_bundle_to_network(
-            &delegate.unlocked().freenet,
-            &delegate.db,
-            &delegate.unlocked().keys,
-            bundle,
-        )
-        .await
-        {
-            Ok(_key) => (true, None),
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "SubscriberRegistryContract publish failed after retries; access granted \
-                     locally only, not yet synced to the network"
-                );
-                (false, Some(e.to_string()))
-            }
-        };
-
-    Ok(serde_json::json!({
-        "tier_id": tier_id,
-        "epoch_id": epoch_id,
-        "preimage": confirmed_preimage,
-        "network_synced": registry_synced,
-        "network_error": network_error,
-        "platform_fee_synced": platform_fee_synced,
-        "platform_fee_error": platform_fee_error,
-    }))
-}
-
-/// Requests a `fee_amount_msat` invoice from the platform fee wallet and
-/// pays it via the reader's own connected wallet (`delegate.unlocked().nwc` - same
-/// dual-role-one-wallet caveat as the main subscription payment in this
-/// milestone's single-identity architecture, see `nwc.rs`'s module docs).
-/// No settlement re-verification via `lookup_invoice` here, unlike the main
-/// payment above - this is a best-effort side collection, not something
-/// worth gating subscriber access on either way.
-async fn collect_platform_fee(delegate: &Delegate, fee_amount_msat: u64, tier_id: u8) -> Result<()> {
-    let description = format!("Aetheria platform fee: tier {tier_id} subscription");
-    let invoice = delegate
-        .unlocked()
-        .platform_fee
-        .make_invoice(fee_amount_msat, &description)
-        .await
-        .context("requesting platform fee invoice via NWC")?;
-    delegate
-        .unlocked()
-        .nwc
-        .pay_invoice(&invoice.bolt11)
-        .await
-        .context("paying platform fee invoice via NWC")?;
-    Ok(())
-}
-
-fn handle_list_subscribers(delegate: &Delegate) -> Result<serde_json::Value> {
-    let rows = delegate.db.list_subscribers()?;
-    let json: Vec<_> = rows
-        .into_iter()
-        .map(|r| {
-            serde_json::json!({
-                "subscriber_pubkey": hex::encode(&r.subscriber_pubkey),
-                "epoch_id": r.epoch_id,
-                "issued_at": r.issued_at,
-            })
-        })
-        .collect();
-    Ok(serde_json::json!(json))
-}
-
 /// Fetches and verifies `author_pubkey_hex`'s real `PublisherProfileContract`
 /// before saving anything - `contracts::fetch_remote_profile` refuses to
 /// return a profile whose signature doesn't check out, so a successful
@@ -1345,17 +907,12 @@ fn handle_list_followed_publishers(delegate: &Delegate) -> Result<serde_json::Va
 
 /// Shared shape for one feed card, used by every feed-producing handler
 /// below (`followed_feed_items`, `handle_get_latest_feed`,
-/// `handle_get_publisher_profile`) so the `locked` rule - a `SubscriberOnly`
-/// post is only ever unlocked when `is_own` - stays in one place. A
-/// publisher can always read their own posts (see `handle_get_post`),
-/// regardless of which feed they're appearing in.
+/// `handle_get_publisher_profile`) so the rendering stays in one place.
 #[allow(clippy::too_many_arguments)]
 fn feed_item_json(
     post_id: [u8; 16],
     title: &str,
     summary: &str,
-    access_level: &aetheria_types::AccessTier,
-    epoch_id: u32,
     published_at: u64,
     author_pubkey: [u8; 32],
     author_display_name: &str,
@@ -1363,22 +920,15 @@ fn feed_item_json(
     is_own: bool,
     post_contract_id: Option<String>,
 ) -> serde_json::Value {
-    let (access_level_str, locked) = match access_level {
-        aetheria_types::AccessTier::Public => ("public", false),
-        aetheria_types::AccessTier::SubscriberOnly { .. } => ("subscriber", !is_own),
-    };
     serde_json::json!({
         "post_id": hex::encode(post_id),
         "title": title,
         "summary": summary,
-        "access_level": access_level_str,
-        "epoch_id": epoch_id,
         "published_at": published_at,
         "author_pubkey": hex::encode(author_pubkey),
         "author_display_name": author_display_name,
         "author_avatar_freenet_key": author_avatar_freenet_key,
         "is_own": is_own,
-        "locked": locked,
         "post_contract_id": post_contract_id,
     })
 }
@@ -1400,28 +950,17 @@ fn cached_post_feed_item(
     author_avatar_freenet_key: Option<&str>,
     is_own: bool,
 ) -> serde_json::Value {
-    let locked = row.access_level == "subscriber" && !is_own;
     serde_json::json!({
         "post_id": hex::encode(row.post_id),
         "title": row.title,
         "summary": row.summary,
-        "access_level": row.access_level,
-        "epoch_id": row.epoch_id,
         "published_at": row.published_at,
         "author_pubkey": hex::encode(row.author_pubkey),
         "author_display_name": row.author_display_name,
         "author_avatar_freenet_key": author_avatar_freenet_key,
         "is_own": is_own,
-        "locked": locked,
         "post_contract_id": row.post_contract_id,
     })
-}
-
-fn access_level_str(access_level: &aetheria_types::AccessTier) -> &'static str {
-    match access_level {
-        aetheria_types::AccessTier::Public => "public",
-        aetheria_types::AccessTier::SubscriberOnly { .. } => "subscriber",
-    }
 }
 
 /// Every followed publisher's posts - a live fetch merged with the durable
@@ -1460,8 +999,6 @@ async fn followed_feed_items(delegate: &Delegate) -> Vec<serde_json::Value> {
                         &header.title,
                         &header.summary,
                         &header.post_contract_id,
-                        access_level_str(&header.access_level),
-                        header.epoch_id,
                         header.published_at,
                         now,
                     ) {
@@ -1472,8 +1009,6 @@ async fn followed_feed_items(delegate: &Delegate) -> Vec<serde_json::Value> {
                         header.post_id,
                         &header.title,
                         &header.summary,
-                        &header.access_level,
-                        header.epoch_id,
                         header.published_at,
                         f.author_pubkey,
                         &f.display_name,
@@ -1570,8 +1105,6 @@ async fn handle_get_latest_feed(delegate: &Delegate) -> Result<serde_json::Value
                     &e.title,
                     &e.summary,
                     &e.post_contract_id,
-                    access_level_str(&e.access_level),
-                    e.epoch_id,
                     e.published_at,
                     now,
                 ) {
@@ -1591,8 +1124,6 @@ async fn handle_get_latest_feed(delegate: &Delegate) -> Result<serde_json::Value
                     e.post_id,
                     &e.title,
                     &e.summary,
-                    &e.access_level,
-                    e.epoch_id,
                     e.published_at,
                     e.author_pubkey,
                     &e.author_display_name,
@@ -1711,8 +1242,6 @@ async fn handle_get_publisher_profile(
                     &header.title,
                     &header.summary,
                     &header.post_contract_id,
-                    access_level_str(&header.access_level),
-                    header.epoch_id,
                     header.published_at,
                     now,
                 ) {
@@ -1723,8 +1252,6 @@ async fn handle_get_publisher_profile(
                     header.post_id,
                     &header.title,
                     &header.summary,
-                    &header.access_level,
-                    header.epoch_id,
                     header.published_at,
                     author_pubkey,
                     &display_name,
@@ -1762,20 +1289,15 @@ async fn handle_get_publisher_profile(
     }))
 }
 
-/// Reader-role: opens a `Public` post from another publisher by its
-/// `PostDataContract` id. The feed already tells the UI which posts are
-/// `locked` (see `followed_feed_items`), but this re-checks the fetched
-/// payload's nonce independently rather than trusting the caller's claim -
-/// a `SubscriberOnly` payload's nonce is genuine random AES-256-GCM output,
-/// never all-zero (see `publish_post_to_network`'s convention), so this is a
-/// real distinguishing check, not a formality.
+/// Reader-role: opens a post from another publisher by its
+/// `PostDataContract` id.
 ///
-/// Once a post's plaintext markdown has been recovered here, it's cached
-/// durably (`db.rs`'s `cached_post_payloads`) - the whole point of this
-/// feature (see CLAUDE.md's positioning notes): once you've actually opened
-/// something, it's yours to keep reading regardless of whether the network
-/// can still produce it later. A live fetch failure falls back to that
-/// cached copy rather than erroring if one exists.
+/// Once a post's markdown has been recovered here, it's cached durably
+/// (`db.rs`'s `cached_post_payloads`) - the whole point of this feature (see
+/// CLAUDE.md's positioning notes): once you've actually opened something,
+/// it's yours to keep reading regardless of whether the network can still
+/// produce it later. A live fetch failure falls back to that cached copy
+/// rather than erroring if one exists.
 async fn handle_get_remote_post(
     delegate: &Delegate,
     post_contract_id: &str,
@@ -1786,14 +1308,8 @@ async fn handle_get_remote_post(
         .unwrap_or(0);
     match contracts::fetch_remote_post_payload(&delegate.unlocked().freenet, post_contract_id).await {
         Ok(payload) => {
-            anyhow::ensure!(
-                payload.nonce == [0u8; 12],
-                "this post is subscriber-only content from another publisher and can't be opened yet - \
-                 there's no mechanism yet for a reader to learn a stranger's ECDH key (see CLAUDE.md's \
-                 Known stub section)"
-            );
-            let markdown = String::from_utf8(payload.cipher_text)
-                .context("decoding remote public post payload as UTF-8 markdown")?;
+            let markdown = String::from_utf8(payload.content)
+                .context("decoding remote post payload as UTF-8 markdown")?;
             if let Err(e) = delegate.db.cache_post_payload(post_contract_id, &markdown, now) {
                 tracing::warn!(error = %e, "caching a remote post's content failed");
             }
@@ -1842,13 +1358,13 @@ async fn handle_get_remote_avatar(
         .unwrap_or(0);
     match contracts::fetch_remote_post_payload(&delegate.unlocked().freenet, avatar_freenet_key).await {
         Ok(payload) => {
-            let mime = sniff_image_mime(&payload.cipher_text);
-            if let Err(e) = delegate.db.cache_avatar(avatar_freenet_key, mime, &payload.cipher_text, now) {
+            let mime = sniff_image_mime(&payload.content);
+            if let Err(e) = delegate.db.cache_avatar(avatar_freenet_key, mime, &payload.content, now) {
                 tracing::warn!(error = %e, "caching a remote avatar failed");
             }
             Ok(serde_json::json!({
                 "avatar_freenet_key": avatar_freenet_key,
-                "avatar_data_url": encode_data_url(mime, &payload.cipher_text),
+                "avatar_data_url": encode_data_url(mime, &payload.content),
             }))
         }
         Err(e) => {
@@ -1910,15 +1426,6 @@ fn encode_data_url(mime: &str, bytes: &[u8]) -> String {
         "data:{mime};base64,{}",
         base64::engine::general_purpose::STANDARD.encode(bytes)
     )
-}
-
-/// Bucket the current time into a coarse ~30-day "billing epoch".
-///
-/// TODO(Phase 3): replace with a real calendar-month epoch once the
-/// subscription renewal scheduler (design doc §6.2) is implemented.
-fn current_epoch_id(now_unix_secs: u64) -> u32 {
-    const THIRTY_DAYS_SECS: u64 = 30 * 24 * 60 * 60;
-    (now_unix_secs / THIRTY_DAYS_SECS) as u32
 }
 
 /// Minimal hex helpers so the delegate doesn't need a full `hex` crate

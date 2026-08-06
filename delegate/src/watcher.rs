@@ -63,7 +63,7 @@
 //! reliable.
 
 use crate::{contracts, db::FollowedPublisherRow, db::LocalStore, freenet_bridge::FreenetBridge};
-use aetheria_types::{AccessTier, PostMetadataHeader};
+use aetheria_types::PostMetadataHeader;
 use freenet_stdlib::prelude::{ContractInstanceId, UpdateData};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -458,8 +458,6 @@ fn record_posts(
             &header.title,
             &header.summary,
             &header.post_contract_id,
-            access_level_str(&header.access_level),
-            header.epoch_id,
             header.published_at,
             now,
         ) {
@@ -488,7 +486,6 @@ fn record_posts(
             continue;
         }
 
-        let locked = matches!(header.access_level, AccessTier::SubscriberOnly { .. });
         tracing::info!(
             publisher = %f.display_name,
             title = %header.title,
@@ -500,23 +497,10 @@ fn record_posts(
             "post_contract_id": header.post_contract_id,
             "title": header.title,
             "summary": header.summary,
-            "access_level": access_level_str(&header.access_level),
-            // Same meaning as `FeedItem.locked` in the UI: a subscriber-only
-            // post from someone else is announced (that's the point - it's a
-            // reason to subscribe) but can't be opened yet, see CLAUDE.md's
-            // "Known stub" section.
-            "locked": locked,
             "author_pubkey": hex_encode(&f.author_pubkey),
             "author_display_name": f.display_name,
             "published_at": header.published_at,
         }));
-    }
-}
-
-fn access_level_str(access_level: &AccessTier) -> &'static str {
-    match access_level {
-        AccessTier::Public => "public",
-        AccessTier::SubscriberOnly { .. } => "subscriber",
     }
 }
 

@@ -91,7 +91,7 @@ export default function Following({
         <p className="text-xs text-neutral-600 mt-2">
           Click a publisher's name from the Home, Latest, or another post's author to follow
           them from their profile - or paste their Ed25519 pubkey (the "Your publication key"
-          hex string shown on their Subscribers tab) here if you don't have a post of theirs
+          hex string shown on their Profile tab) here if you don't have a post of theirs
           to click yet.
         </p>
       </div>

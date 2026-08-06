@@ -5,14 +5,10 @@
 
 const DELEGATE_IPC_URL = "ws://127.0.0.1:47021";
 
-export type AccessLevel = "public" | "subscriber";
-
 export interface PostSummary {
   post_id: string;
   title: string;
   summary: string;
-  access_level: AccessLevel;
-  epoch_id: number;
   published_at: number;
 }
 
@@ -30,52 +26,14 @@ export interface Profile {
   /// Encoded contract id of the avatar's `PostDataContract` instance on
   /// Freenet, or `null` if it hasn't reached the network yet.
   avatar_freenet_key: string | null;
+  /// This delegate's own hex-encoded Ed25519 pubkey - what someone else
+  /// pastes into their Following tab to follow you.
+  author_pubkey: string;
 }
 
 export interface UpdateProfileResult extends Profile {
   network_synced: boolean;
   network_error: string | null;
-}
-
-export interface Tier {
-  tier_id: number;
-  name: string;
-  price_sats_per_month: number;
-  features: string[];
-}
-
-export interface SubscriptionInfo {
-  /// The target publication's Ed25519 pubkey (hex) - what a reader's
-  /// Delegate would use to locate the `SubscriberRegistryContract` on
-  /// Freenet. Echoes back whichever pubkey `getSubscriptionInfo` was called
-  /// with (or this delegate's own, if omitted).
-  publisher_pubkey: string;
-  /// This delegate's own secp256k1 identity pubkey (hex, compressed) - the
-  /// `EncryptedKeyBundle.subscriber_pubkey` a bundle addressed to "you"
-  /// would be keyed on. Constant regardless of `publisher_pubkey` - it's
-  /// always about *this* delegate's reader identity.
-  subscriber_pubkey: string;
-  tiers: Tier[];
-  wallet_connected: boolean;
-  /// `false` for any `publisher_pubkey` other than this delegate's own -
-  /// there's no channel yet for a reader to learn a stranger's secp256k1
-  /// key, so `subscribe` will reject immediately for those (see
-  /// `Subscriptions.tsx`, and CLAUDE.md's "Known stub" section).
-  subscribable: boolean;
-}
-
-export interface SubscribeResult {
-  tier_id: number;
-  epoch_id: number;
-  preimage: string;
-  network_synced: boolean;
-  network_error: string | null;
-}
-
-export interface SubscriberEntry {
-  subscriber_pubkey: string;
-  epoch_id: number;
-  issued_at: number;
 }
 
 /// One entry in the Home (following) feed, the Latest (network-wide) feed,
@@ -87,8 +45,6 @@ export interface FeedItem {
   post_id: string;
   title: string;
   summary: string;
-  access_level: AccessLevel;
-  epoch_id: number;
   published_at: number;
   /// Hex-encoded Ed25519 pubkey of whoever published this post.
   author_pubkey: string;
@@ -100,13 +56,6 @@ export interface FeedItem {
   /// bug).
   author_avatar_freenet_key: string | null;
   is_own: boolean;
-  /// `true` for a `subscriber`-access post from someone *other* than this
-  /// delegate - unopenable for now, since decrypting it needs the
-  /// publisher's ECDH key and there's no way yet for a reader to discover a
-  /// stranger's secp256k1 identity key (see CLAUDE.md's "Known stub"
-  /// section). Always `false` for this delegate's own posts, subscriber or
-  /// not - the local epoch key is already available for those.
-  locked: boolean;
   /// The post's `PostDataContract` id, or `null` if it hasn't reached the
   /// network yet (own posts only - a remote post only ever appears here
   /// once it's already in the fetched index, so this is always set for
@@ -214,11 +163,6 @@ export interface NewPostEvent {
   post_contract_id: string;
   title: string;
   summary: string;
-  access_level: AccessLevel;
-  /// Subscriber-only post from someone else: announced on purpose (that's
-  /// the point of a teaser) but not openable yet - same meaning as
-  /// `FeedItem.locked`.
-  locked: boolean;
   author_pubkey: string;
   author_display_name: string;
   published_at: number;
@@ -384,7 +328,6 @@ class DelegateClient {
     title: string;
     summary: string;
     markdown: string;
-    access: AccessLevel;
   }): Promise<{ post_id: string }> {
     return this.call("publish_post", input);
   }
@@ -400,40 +343,6 @@ class DelegateClient {
     avatar_data_url?: string | null;
   }): Promise<UpdateProfileResult> {
     return this.call("update_profile", input);
-  }
-
-  /// Connect a Lightning wallet via Nostr Wallet Connect (NIP-47) - a
-  /// `nostr+walletconnect://...` URI exported from a wallet such as Alby,
-  /// Mutiny, Phoenix, or Umbrel.
-  connectWallet(uri: string): Promise<{ connected: boolean }> {
-    return this.call("connect_wallet", { uri });
-  }
-
-  /// Omit `authorPubkey` (or pass this delegate's own) for the classic
-  /// self-subscribe path. Any other target comes back with
-  /// `subscribable: false` - see `SubscriptionInfo.subscribable`.
-  getSubscriptionInfo(authorPubkey?: string): Promise<SubscriptionInfo> {
-    return this.call(
-      "get_subscription_info",
-      authorPubkey ? { author_pubkey: authorPubkey } : {},
-    );
-  }
-
-  /// Pays for `tier_id` via the connected wallet, then (once settlement is
-  /// verified) delivers an ECDH-encrypted epoch key bundle. Requires a
-  /// wallet to already be connected via `connectWallet`. `authorPubkey`
-  /// omitted (or equal to this delegate's own) is the only target that
-  /// actually works today - anything else rejects immediately with a clear
-  /// "not supported yet" error (see `SubscriptionInfo.subscribable`).
-  subscribe(tierId: number, authorPubkey?: string): Promise<SubscribeResult> {
-    return this.call("subscribe", {
-      tier_id: tierId,
-      ...(authorPubkey ? { author_pubkey: authorPubkey } : {}),
-    });
-  }
-
-  listSubscribers(): Promise<SubscriberEntry[]> {
-    return this.call("list_subscribers");
   }
 
   /// Fetches and verifies `authorPubkey`'s real `PublisherProfileContract`
@@ -473,9 +382,7 @@ class DelegateClient {
     return this.call("get_publisher_profile", { author_pubkey: authorPubkey });
   }
 
-  /// Opens a `public`-access post from another publisher. Throws if the
-  /// fetched post turns out to be subscriber-only - check `FeedItem.locked`
-  /// first and don't call this for a locked item.
+  /// Opens a post from another publisher.
   getRemotePost(postContractId: string): Promise<RemotePostDetail> {
     return this.call("get_remote_post", { post_contract_id: postContractId });
   }

@@ -1,13 +1,12 @@
 //! `PublisherProfileContract` — Layer 3 Freenet WASM contract.
 //!
-//! Holds a single publisher's public identity, publication metadata, tier
-//! pricing, and a pointer to their `ContentIndexContract`. State updates are
-//! only accepted when signed by the publisher's Ed25519 master key and newer
-//! than the currently stored state (last-writer-wins on `updated_at`).
+//! Holds a single publisher's public identity, publication metadata, and a
+//! pointer to their `ContentIndexContract`. State updates are only accepted
+//! when signed by the publisher's Ed25519 master key and newer than the
+//! currently stored state (last-writer-wins on `updated_at`).
 //!
 //! See `docs/Decentralized_Substack_Design_Doc.pdf` section 3.1.
 
-use aetheria_types::Tier;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use freenet_stdlib::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -21,7 +20,6 @@ pub struct PublisherProfile {
     pub description: String,
     /// Freenet key pointing to an avatar media contract.
     pub avatar_freenet_key: Option<String>,
-    pub subscription_tiers: Vec<Tier>,
     /// Freenet contract ID for this publication's article index.
     pub content_index_contract_id: String,
     pub updated_at: u64,

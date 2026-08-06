@@ -18,11 +18,10 @@ export default function Security() {
       <p className="text-neutral-400 leading-relaxed">
         When you create an identity, Aetheria generates a real cryptographic
         keypair and encrypts it on disk using a key derived from your
-        passphrase. That keypair is what signs every post you publish (so
-        readers can verify it&apos;s genuinely from you) and what a
-        subscriber&apos;s payment gets tied to. Not even someone with access
-        to your computer&apos;s files can use that identity without your
-        passphrase.
+        passphrase. That keypair is what signs every post you publish, so
+        readers can verify it&apos;s genuinely from you. Not even someone
+        with access to your computer&apos;s files can use that identity
+        without your passphrase.
       </p>
 
       <h2 className="text-xl font-semibold text-neutral-100 mt-10 mb-3">
@@ -52,20 +51,19 @@ export default function Security() {
         Your encrypted identity file and a local cache of your own posts
         live only on your computer. The Aetheria app talks to a local
         background process (the &quot;delegate&quot;) over a connection that
-        never leaves your machine. Your keys and any decrypted subscriber
-        content never get sent anywhere except the signed, already-public
-        data your posts are made of.
+        never leaves your machine. Your keys never get sent anywhere except
+        the signed, already-public data your posts are made of.
       </p>
 
       <h2 className="text-xl font-semibold text-neutral-100 mt-10 mb-3">
         What&apos;s public
       </h2>
       <p className="text-neutral-400 leading-relaxed">
-        Once you publish, your public key, your public posts, and the
-        title/summary of your subscriber-only posts are visible to anyone on
-        the network. That&apos;s how following, discovery, and the Latest
-        feed work. Only the full content of subscriber-only posts is
-        encrypted.
+        Once you publish, your public key and every post you write are
+        visible to anyone on the network. That&apos;s how following,
+        discovery, and the Latest feed work. There&apos;s no private or
+        paywalled content in Aetheria; everything you publish is public by
+        design.
       </p>
     </article>
   );

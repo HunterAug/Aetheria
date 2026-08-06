@@ -113,11 +113,8 @@ async fn a_followed_publishers_new_post_arrives_as_a_push_event_over_real_ipc() 
         rand_post_id(),
         backlog_title,
         "Published before the reader followed - priming must absorb this silently.",
-        aetheria_types::AccessTier::Public,
-        1,
         now_unix(),
         b"backlog".to_vec(),
-        [0u8; 12],
     )
     .await
     .expect("publish the backlog post");
@@ -200,11 +197,8 @@ async fn a_followed_publishers_new_post_arrives_as_a_push_event_over_real_ipc() 
         rand_post_id(),
         new_title,
         "Published after the follow - this is the one that must reach the UI unprompted.",
-        aetheria_types::AccessTier::Public,
-        1,
         now_unix(),
         b"brand new".to_vec(),
-        [0u8; 12],
     )
     .await
     .expect("publish the new post");
@@ -240,7 +234,6 @@ async fn a_followed_publishers_new_post_arrives_as_a_push_event_over_real_ipc() 
     );
     assert_eq!(event["author_pubkey"], publisher_pubkey_hex);
     assert_eq!(event["author_display_name"], followed_display_name);
-    assert_eq!(event["locked"], false, "a public post is not locked");
 
     println!("PASS: a followed publisher's new post reached this delegate as an unprompted push");
 

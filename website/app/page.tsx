@@ -15,8 +15,8 @@ const FEATURES = [
     body: "Your identity is an Ed25519 keypair on your machine, encrypted with a passphrase only you know. Every post is cryptographically signed, so readers can always verify it's really from you. No account to hack, no company holding your identity.",
   },
   {
-    title: "Direct payments, no middleman",
-    body: "Offer paid tiers. Readers subscribe directly with their Lightning wallet. Most of the money goes straight to you. Aetheria takes a small 2% cut to cover infrastructure costs, but never sees who paid whom.",
+    title: "Completely free, no catch",
+    body: "No subscriptions, no payments, no platform fees. Publish and read for free, forever. Aetheria makes money from nobody, because it doesn't need to.",
   },
 ];
 

@@ -1,11 +1,9 @@
 // Shared rendering for a list of `FeedItem`s - used by both ReaderFeed.tsx's
-// merged Home view and Following.tsx's followed-only view, so the "who
-// published this, is it locked" per-card treatment stays in one place
-// instead of drifting between the two feeds.
+// merged Home view and Following.tsx's followed-only view, so the per-card
+// treatment stays in one place instead of drifting between the two feeds.
 
 import type { FeedItem } from "../lib/delegate";
 import { relativeTime } from "../lib/format";
-import { LockIcon } from "./icons";
 import Avatar from "./Avatar";
 
 export function FeedItemsList({
@@ -57,36 +55,17 @@ export function FeedItemsList({
                   </span>
                 )}
                 <span className="text-neutral-500">{relativeTime(item.published_at)}</span>
-                {item.access_level === "subscriber" && (
-                  <span className="text-xs bg-aepurple-500/15 text-aepurple-400 px-1.5 py-0.5 rounded flex items-center gap-1">
-                    {item.locked && <LockIcon className="w-3 h-3" />}
-                    Subscriber
-                  </span>
-                )}
                 {opening === item.post_id && (
                   <span className="text-xs text-neutral-500">opening…</span>
                 )}
               </div>
               <button
                 onClick={() => onOpen(item)}
-                disabled={item.locked || opening === item.post_id}
-                title={item.locked ? "Subscriber-only post - can't be opened yet" : undefined}
+                disabled={opening === item.post_id}
                 className="block w-full text-left disabled:cursor-not-allowed"
               >
-                <p
-                  className={`text-sm font-medium mt-0.5 ${
-                    item.locked ? "text-neutral-500" : "text-neutral-200"
-                  }`}
-                >
-                  {item.title}
-                </p>
+                <p className="text-sm font-medium mt-0.5 text-neutral-200">{item.title}</p>
                 <p className="text-sm text-neutral-400 mt-0.5 truncate">{item.summary}</p>
-                {item.locked && (
-                  <p className="text-xs text-neutral-600 mt-1 flex items-center gap-1">
-                    <LockIcon className="w-3 h-3" />
-                    Subscriber-only content from another publisher isn't unlockable yet
-                  </p>
-                )}
               </button>
             </div>
           </div>

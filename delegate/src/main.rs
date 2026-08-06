@@ -2,9 +2,8 @@
 //!
 //! A native Rust daemon that runs alongside the desktop UI. It owns the
 //! user's private keys, talks to a local Freenet node over its native host
-//! protocol, drives the NWC (NIP-47) payment flow, and maintains a local
-//! SQLite cache of decrypted content so the UI never has to touch key
-//! material or ciphertext directly.
+//! protocol, and maintains a local SQLite cache of content so the UI never
+//! has to touch key material directly.
 //!
 //! Thin wrapper around the `aetheria_delegate` library crate (see
 //! `src/lib.rs`) - the actual subsystems live there so
@@ -39,8 +38,8 @@ async fn main() -> Result<()> {
     // attached terminal for `rpassword` to prompt on - see keys.rs's module
     // docs). So `main()`'s job is now just standing up the IPC listener;
     // everything that used to happen here after key loading (connecting to
-    // Freenet, publishing/loading this identity's contracts, connecting the
-    // NWC wallets) moved into `ipc.rs`'s `finish_unlock`, which runs once a
+    // Freenet, publishing/loading this identity's contracts) moved into
+    // `ipc.rs`'s `finish_unlock`, which runs once a
     // passphrase actually arrives - either the same legacy env-var/stdin
     // paths this used to use synchronously (see `ipc.rs::try_legacy_auto_unlock`,
     // spawned alongside the listener below), or a real `unlock` IPC request

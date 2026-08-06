@@ -76,14 +76,11 @@ async fn following_a_publisher_and_reading_their_public_post_round_trips_over_th
         rand_post_id(),
         "Hello from Publisher B",
         "A public test post for follow_publisher_e2e_test.",
-        aetheria_types::AccessTier::Public,
-        123, // epoch_id, irrelevant for a public post
         now_unix(),
         markdown.as_bytes().to_vec(),
-        [0u8; 12], // public-post convention: plaintext bytes, all-zero nonce
     )
     .await
-    .expect("publish a real public PostDataContract");
+    .expect("publish a real PostDataContract");
 
     let publisher_author_pubkey = publisher_keys.master_signing_verifying_bytes();
     println!(
@@ -143,16 +140,14 @@ async fn following_a_publisher_and_reading_their_public_post_round_trips_over_th
         .find(|p| p.post_contract_id == post_contract_id)
         .expect("the post just published should be in the fetched index");
     assert_eq!(header.title, "Hello from Publisher B");
-    assert_eq!(header.access_level, aetheria_types::AccessTier::Public);
 
     // 3. Fetch and decode the actual post payload - the same path
-    //    `ipc.rs::handle_get_remote_post` takes for a `Public` post.
+    //    `ipc.rs::handle_get_remote_post` takes.
     let payload = contracts::fetch_remote_post_payload(&freenet_reader, &header.post_contract_id)
         .await
         .expect("fetch the real PostDataContract payload");
-    assert_eq!(payload.nonce, [0u8; 12], "public posts use the all-zero-nonce convention");
     let recovered_markdown =
-        String::from_utf8(payload.cipher_text).expect("public post payload is valid UTF-8 markdown");
+        String::from_utf8(payload.content).expect("post payload is valid UTF-8 markdown");
     assert_eq!(
         recovered_markdown, markdown,
         "reader must recover the exact markdown the publisher published, over the real network, \

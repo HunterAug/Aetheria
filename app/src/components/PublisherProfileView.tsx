@@ -56,7 +56,6 @@ export default function PublisherProfileView({
   }
 
   async function open(item: FeedItem) {
-    if (item.locked) return;
     setOpening(item.post_id);
     setError(null);
     try {

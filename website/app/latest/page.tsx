@@ -22,8 +22,6 @@ interface FeedEntry {
   title: string;
   summary: string;
   post_contract_id: string;
-  access_level: "public" | "subscriber";
-  locked: boolean;
   published_at: number;
 }
 
@@ -75,7 +73,7 @@ export default function Latest() {
       <p className="mt-3 text-neutral-400 leading-relaxed">
         Real posts from the real Aetheria network, browsable here without
         installing anything. This page is read-only. You can look, but
-        publishing, following, and subscribing all require the app itself.
+        publishing and following require the app itself.
       </p>
       {snapshot && (
         <p className="mt-2 text-xs text-neutral-600">
@@ -114,26 +112,11 @@ export default function Latest() {
                   <span className="text-neutral-500">
                     {relativeTime(item.published_at)}
                   </span>
-                  {item.locked && (
-                    <span className="text-xs bg-aepurple-500/15 text-aepurple-400 px-1.5 py-0.5 rounded">
-                      Subscriber-only
-                    </span>
-                  )}
                 </div>
-                <p
-                  className={`text-sm font-medium mt-0.5 ${
-                    item.locked ? "text-neutral-500" : "text-neutral-200"
-                  }`}
-                >
+                <p className="text-sm font-medium mt-0.5 text-neutral-200">
                   {item.title}
                 </p>
                 <p className="text-sm text-neutral-400 mt-0.5">{item.summary}</p>
-                {item.locked && (
-                  <p className="text-xs text-neutral-600 mt-1">
-                    Full content is encrypted for subscribers. This preview
-                    is all anyone else ever sees.
-                  </p>
-                )}
               </div>
             </li>
           ))}

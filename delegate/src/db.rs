@@ -1,5 +1,5 @@
-//! Local SQLite cache: decrypted posts, subscriber records, and epoch keys
-//! the Delegate has recovered so the UI can render feeds offline.
+//! Local SQLite cache: this delegate's own posts, plus everything it has
+//! fetched from the network, so the UI can render feeds offline.
 
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -25,8 +25,6 @@ pub struct PostSummary {
     pub post_id: [u8; 16],
     pub title: String,
     pub summary: String,
-    pub access_level: String,
-    pub epoch_id: u32,
     pub published_at: u64,
     /// `None` until `publish_post_to_network` succeeds for this post (see
     /// `ipc.rs::handle_publish_post`) - the local SQLite write happens first
@@ -53,26 +51,12 @@ pub struct ProfileRow {
     pub updated_at: u64,
 }
 
-/// Full stored representation of a post, before decryption.
+/// Full stored representation of a post.
 pub struct PostRow {
     pub title: String,
-    pub access_level: String,
-    pub epoch_id: u32,
-    /// Present only for `access_level = "public"` posts.
-    pub markdown_plain: Option<String>,
-    /// Present only for `access_level = "subscriber"` posts.
-    pub cipher_text: Option<Vec<u8>>,
-    pub nonce: Option<Vec<u8>>,
+    pub markdown: String,
     /// See `PostSummary::post_contract_id` - same "not yet synced" meaning.
     pub post_contract_id: Option<String>,
-}
-
-/// A locally-recorded grant of subscriber access - see `LocalStore::record_subscriber`.
-pub struct SubscriberRow {
-    /// Compressed SEC1 secp256k1 pubkey (33 bytes).
-    pub subscriber_pubkey: Vec<u8>,
-    pub epoch_id: u32,
-    pub issued_at: u64,
 }
 
 /// One publisher's profile as last successfully fetched from the network -
@@ -95,12 +79,6 @@ pub struct CachedRemotePost {
     pub title: String,
     pub summary: String,
     pub post_contract_id: String,
-    /// `"public"` or `"subscriber"` - mirrors `feed_item_json`'s flattening
-    /// of `AccessTier` rather than storing the enum's own serde shape, so
-    /// reconstructing a feed item back out doesn't need this module to know
-    /// `aetheria_types::AccessTier` at all.
-    pub access_level: String,
-    pub epoch_id: u32,
     pub published_at: u64,
 }
 
@@ -129,26 +107,9 @@ impl LocalStore {
                 post_id       BLOB PRIMARY KEY,
                 title         TEXT NOT NULL,
                 summary       TEXT NOT NULL,
-                markdown      TEXT,
-                cipher_text   BLOB,
-                nonce         BLOB,
-                access_level  TEXT NOT NULL,
-                epoch_id      INTEGER NOT NULL,
+                markdown      TEXT NOT NULL,
                 published_at  INTEGER NOT NULL,
                 post_contract_id TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS epoch_keys (
-                epoch_id      INTEGER PRIMARY KEY,
-                key_bytes     BLOB NOT NULL,
-                recovered_at  INTEGER NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS subscribers (
-                subscriber_pubkey BLOB NOT NULL,
-                epoch_id          INTEGER NOT NULL,
-                issued_at         INTEGER NOT NULL,
-                PRIMARY KEY (subscriber_pubkey, epoch_id)
             );
 
             CREATE TABLE IF NOT EXISTS contract_registry (
@@ -202,8 +163,6 @@ impl LocalStore {
                 author_display_name  TEXT NOT NULL,
                 title                TEXT NOT NULL,
                 summary              TEXT NOT NULL,
-                access_level         TEXT NOT NULL,
-                epoch_id             INTEGER NOT NULL,
                 published_at         INTEGER NOT NULL,
                 cached_at            INTEGER NOT NULL
             );
@@ -321,26 +280,17 @@ impl LocalStore {
         post_id: &[u8; 16],
         title: &str,
         summary: &str,
-        access_level: &str,
-        epoch_id: u32,
         published_at: u64,
-        markdown_plain: Option<&str>,
-        cipher_text: Option<&[u8]>,
-        nonce: Option<&[u8; 12]>,
+        markdown: &str,
     ) -> Result<()> {
         self.conn.lock().expect("db mutex poisoned").execute(
-            "INSERT INTO posts
-                (post_id, title, summary, markdown, cipher_text, nonce, access_level, epoch_id, published_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO posts (post_id, title, summary, markdown, published_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 post_id.as_slice(),
                 title,
                 summary,
-                markdown_plain,
-                cipher_text,
-                nonce.map(|n| n.as_slice()),
-                access_level,
-                epoch_id,
+                markdown,
                 published_at as i64,
             ],
         )?;
@@ -350,21 +300,18 @@ impl LocalStore {
     pub fn list_posts(&self) -> Result<Vec<PostSummary>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT post_id, title, summary, access_level, epoch_id, published_at, post_contract_id
+            "SELECT post_id, title, summary, published_at, post_contract_id
              FROM posts ORDER BY published_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
             let post_id: Vec<u8> = row.get(0)?;
-            let epoch_id: i64 = row.get(4)?;
-            let published_at: i64 = row.get(5)?;
+            let published_at: i64 = row.get(3)?;
             Ok(PostSummary {
                 post_id: post_id.try_into().unwrap_or([0u8; 16]),
                 title: row.get(1)?,
                 summary: row.get(2)?,
-                access_level: row.get(3)?,
-                epoch_id: epoch_id as u32,
                 published_at: published_at as u64,
-                post_contract_id: row.get(6)?,
+                post_contract_id: row.get(4)?,
             })
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -376,19 +323,13 @@ impl LocalStore {
             .lock()
             .expect("db mutex poisoned")
             .query_row(
-                "SELECT title, access_level, epoch_id, markdown, cipher_text, nonce, post_contract_id
-                 FROM posts WHERE post_id = ?1",
+                "SELECT title, markdown, post_contract_id FROM posts WHERE post_id = ?1",
                 params![post_id.as_slice()],
                 |row| {
-                    let epoch_id: i64 = row.get(2)?;
                     Ok(PostRow {
                         title: row.get(0)?,
-                        access_level: row.get(1)?,
-                        epoch_id: epoch_id as u32,
-                        markdown_plain: row.get(3)?,
-                        cipher_text: row.get(4)?,
-                        nonce: row.get(5)?,
-                        post_contract_id: row.get(6)?,
+                        markdown: row.get(1)?,
+                        post_contract_id: row.get(2)?,
                     })
                 },
             )
@@ -408,25 +349,6 @@ impl LocalStore {
             params![post_contract_id, post_id.as_slice()],
         )?;
         Ok(())
-    }
-
-    /// Returns the key for `epoch_id`, generating and storing one if it
-    /// doesn't exist yet (first post published in a new epoch).
-    pub fn get_or_create_epoch_key(
-        &self,
-        epoch_id: u32,
-        generate: impl FnOnce() -> [u8; 32],
-        now: u64,
-    ) -> Result<[u8; 32]> {
-        if let Some(existing) = self.get_epoch_key(epoch_id)? {
-            return Ok(existing);
-        }
-        let key = generate();
-        self.conn.lock().expect("db mutex poisoned").execute(
-            "INSERT INTO epoch_keys (epoch_id, key_bytes, recovered_at) VALUES (?1, ?2, ?3)",
-            params![epoch_id, key.as_slice(), now as i64],
-        )?;
-        Ok(key)
     }
 
     /// Reads this delegate's locally-cached profile fields, or `None` if
@@ -477,48 +399,6 @@ impl LocalStore {
             params![display_name, bio, avatar_bytes, avatar_mime, updated_at as i64],
         )?;
         Ok(())
-    }
-
-    /// Records that this publisher just issued (or re-issued) an
-    /// `EncryptedKeyBundle` to `subscriber_pubkey` for `epoch_id` - a purely
-    /// local bookkeeping row for `list_subscribers` to render quickly,
-    /// written unconditionally the moment the delegate decides to grant
-    /// access (same local-first philosophy as `insert_post`/`set_profile`:
-    /// the decision to subscribe them is real regardless of whether the
-    /// network publish of the bundle itself, `contracts::publish_key_bundle_to_network`,
-    /// succeeds or is still retrying).
-    pub fn record_subscriber(
-        &self,
-        subscriber_pubkey: &[u8; 33],
-        epoch_id: u32,
-        issued_at: u64,
-    ) -> Result<()> {
-        self.conn.lock().expect("db mutex poisoned").execute(
-            "INSERT INTO subscribers (subscriber_pubkey, epoch_id, issued_at) VALUES (?1, ?2, ?3)
-             ON CONFLICT(subscriber_pubkey, epoch_id) DO UPDATE SET issued_at = excluded.issued_at",
-            params![subscriber_pubkey.as_slice(), epoch_id, issued_at as i64],
-        )?;
-        Ok(())
-    }
-
-    /// Locally-recorded (subscriber pubkey, epoch) grants, most recent
-    /// first - see `record_subscriber`.
-    pub fn list_subscribers(&self) -> Result<Vec<SubscriberRow>> {
-        let conn = self.conn.lock().expect("db mutex poisoned");
-        let mut stmt = conn.prepare(
-            "SELECT subscriber_pubkey, epoch_id, issued_at FROM subscribers ORDER BY issued_at DESC",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            let subscriber_pubkey: Vec<u8> = row.get(0)?;
-            let epoch_id: i64 = row.get(1)?;
-            let issued_at: i64 = row.get(2)?;
-            Ok(SubscriberRow {
-                subscriber_pubkey,
-                epoch_id: epoch_id as u32,
-                issued_at: issued_at as u64,
-            })
-        })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
     }
 
     /// Records (or re-confirms) that this delegate follows `author_pubkey` -
@@ -646,23 +526,19 @@ impl LocalStore {
         title: &str,
         summary: &str,
         post_contract_id: &str,
-        access_level: &str,
-        epoch_id: u32,
         published_at: u64,
         cached_at: u64,
     ) -> Result<()> {
         self.conn.lock().expect("db mutex poisoned").execute(
             "INSERT INTO cached_remote_posts
-                (post_contract_id, post_id, author_pubkey, author_display_name, title, summary, access_level, epoch_id, published_at, cached_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                (post_contract_id, post_id, author_pubkey, author_display_name, title, summary, published_at, cached_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(post_contract_id) DO UPDATE SET
                 post_id = excluded.post_id,
                 author_pubkey = excluded.author_pubkey,
                 author_display_name = excluded.author_display_name,
                 title = excluded.title,
                 summary = excluded.summary,
-                access_level = excluded.access_level,
-                epoch_id = excluded.epoch_id,
                 published_at = excluded.published_at,
                 cached_at = excluded.cached_at",
             params![
@@ -672,8 +548,6 @@ impl LocalStore {
                 author_display_name,
                 title,
                 summary,
-                access_level,
-                epoch_id,
                 published_at as i64,
                 cached_at as i64,
             ],
@@ -687,7 +561,7 @@ impl LocalStore {
     pub fn list_cached_remote_posts(&self) -> Result<Vec<CachedRemotePost>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT post_id, author_pubkey, author_display_name, title, summary, post_contract_id, access_level, epoch_id, published_at
+            "SELECT post_id, author_pubkey, author_display_name, title, summary, post_contract_id, published_at
              FROM cached_remote_posts ORDER BY published_at DESC",
         )?;
         let rows = stmt.query_map([], Self::row_to_cached_remote_post)?;
@@ -703,7 +577,7 @@ impl LocalStore {
     ) -> Result<Vec<CachedRemotePost>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT post_id, author_pubkey, author_display_name, title, summary, post_contract_id, access_level, epoch_id, published_at
+            "SELECT post_id, author_pubkey, author_display_name, title, summary, post_contract_id, published_at
              FROM cached_remote_posts WHERE author_pubkey = ?1 ORDER BY published_at DESC",
         )?;
         let rows = stmt.query_map(params![author_pubkey.as_slice()], Self::row_to_cached_remote_post)?;
@@ -713,8 +587,7 @@ impl LocalStore {
     fn row_to_cached_remote_post(row: &rusqlite::Row) -> rusqlite::Result<CachedRemotePost> {
         let post_id: Vec<u8> = row.get(0)?;
         let author_pubkey: Vec<u8> = row.get(1)?;
-        let epoch_id: i64 = row.get(7)?;
-        let published_at: i64 = row.get(8)?;
+        let published_at: i64 = row.get(6)?;
         Ok(CachedRemotePost {
             post_id: post_id.try_into().unwrap_or([0u8; 16]),
             author_pubkey: author_pubkey.try_into().unwrap_or([0u8; 32]),
@@ -722,8 +595,6 @@ impl LocalStore {
             title: row.get(3)?,
             summary: row.get(4)?,
             post_contract_id: row.get(5)?,
-            access_level: row.get(6)?,
-            epoch_id: epoch_id as u32,
             published_at: published_at as u64,
         })
     }
@@ -821,26 +692,6 @@ impl LocalStore {
             .map_err(Into::into)
     }
 
-    pub fn get_epoch_key(&self, epoch_id: u32) -> Result<Option<[u8; 32]>> {
-        self.conn
-            .lock()
-            .expect("db mutex poisoned")
-            .query_row(
-                "SELECT key_bytes FROM epoch_keys WHERE epoch_id = ?1",
-                params![epoch_id],
-                |row| {
-                    let bytes: Vec<u8> = row.get(0)?;
-                    Ok(bytes)
-                },
-            )
-            .optional()?
-            .map(|bytes| {
-                bytes
-                    .try_into()
-                    .map_err(|_| anyhow::anyhow!("corrupt epoch key length"))
-            })
-            .transpose()
-    }
 }
 
 #[cfg(test)]
@@ -991,8 +842,6 @@ mod tests {
             "Alice's post",
             "summary",
             "contract-1",
-            "public",
-            0,
             200,
             1000,
         )
@@ -1004,8 +853,6 @@ mod tests {
             "Bob's post",
             "summary",
             "contract-2",
-            "subscriber",
-            0,
             100,
             1000,
         )
@@ -1029,12 +876,12 @@ mod tests {
         let (db, dir) = open_temp();
         let author = [7u8; 32];
         db.cache_remote_post(
-            &[1u8; 16], &author, "Author", "Old title", "old summary", "contract-x", "public", 0,
+            &[1u8; 16], &author, "Author", "Old title", "old summary", "contract-x",
             100, 1000,
         )
         .unwrap();
         db.cache_remote_post(
-            &[1u8; 16], &author, "Author", "New title", "new summary", "contract-x", "public", 0,
+            &[1u8; 16], &author, "Author", "New title", "new summary", "contract-x",
             100, 2000,
         )
         .unwrap();

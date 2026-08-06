@@ -2,9 +2,8 @@
 //! WebSocket API exposed by `freenet-core` at a local port).
 //!
 //! Responsible for PUT/GET/UPDATE/SUBSCRIBE against the Aetheria contracts
-//! (`PublisherProfileContract`, `ContentIndexContract`, `PostDataContract`;
-//! `SubscriberRegistryContract` is untouched - no real NWC subscriber flow
-//! yet, see `nwc.rs`).
+//! (`PublisherProfileContract`, `ContentIndexContract`, `PostDataContract`,
+//! `GlobalDirectoryContract`).
 //!
 //! **Corrected 2026-08-02** from the CLAUDE.md note this module's docs used
 //! to carry: the client WebSocket endpoint is

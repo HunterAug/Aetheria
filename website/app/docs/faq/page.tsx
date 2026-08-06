@@ -16,23 +16,15 @@ const QA = [
   },
   {
     q: "What happens if I turn my computer off?",
-    a: "Once a post reaches the Freenet network, it's held by other peers too, not just your machine. That's the point. Your own computer doesn't need to stay online for your existing posts to remain readable. You do need your app running (and online) to publish new posts, read subscriber-only content, or manage your subscriptions.",
+    a: "Once a post reaches the Freenet network, it's held by other peers too, not just your machine. That's the point. Your own computer doesn't need to stay online for your existing posts to remain readable. You do need your app running (and online) to publish new posts.",
   },
   {
     q: "Is my writing permanent forever?",
     a: "Freenet keeps data that's actually being requested; content nobody looks at for a long time can fade from the network over time (the project's design plans a “pinning” feature to combat this, not yet built). In practice, anything with real readers stays alive. Separately, anything you've personally opened is saved on your own device the moment you read it. That copy is yours, readable offline, regardless of what later happens on the network.",
   },
   {
-    q: "Who can read my subscriber-only posts?",
-    a: "Only people who've paid and been granted the decryption key for that billing period. Everyone else, including someone browsing the Latest feed, sees just the title and a short summary, never the encrypted content.",
-  },
-  {
-    q: "Do you take a cut of subscriptions?",
-    a: "By default, no. 100% of a subscription payment goes directly from a reader's wallet to a publisher's wallet. The protocol optionally supports a small (2%) platform fee split if a specific build of the app is configured to collect one, but that's opt-in per deployment, not something baked in by default.",
-  },
-  {
     q: "Is this free?",
-    a: "Yes. Aetheria is free, open-source software. There's no subscription to use the app itself, only the optional payments between publishers and their own subscribers.",
+    a: "Yes. Aetheria is free, open-source software, with no subscriptions, payments, or fees anywhere in it. Publish and read for free, forever.",
   },
   {
     q: "What is Freenet, exactly?",

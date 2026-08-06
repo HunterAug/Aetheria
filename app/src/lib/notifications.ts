@@ -48,10 +48,7 @@ async function showOsNotification(title: string, body: string): Promise<void> {
 function notificationText(event: NewPostEvent): { title: string; body: string } {
   return {
     title: `New from ${event.author_display_name}`,
-    // The post title is the useful part; a subscriber-only post is still
-    // announced (the teaser is the point - see CLAUDE.md's Latest-feed
-    // section) but says so, since it can't be opened yet.
-    body: event.locked ? `${event.title} (subscribers only)` : event.title,
+    body: event.title,
   };
 }
 
