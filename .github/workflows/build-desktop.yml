@@ -1,0 +1,150 @@
+# Builds the desktop app (delegate + bundled Freenet sidecar + Tauri shell)
+# for Windows, macOS, and Linux, and uploads each platform's installer as a
+# workflow artifact.
+#
+# Why this exists: the app was previously only ever built by hand, on one
+# Windows dev machine (see root CLAUDE.md's `scripts/build.sh`, which is
+# deliberately Windows-only - hardcoded `.exe` paths, a hardcoded Windows
+# cargo PATH). Nothing about `delegate/` or `app/src-tauri/` is actually
+# Windows-specific (no `cfg(windows)`, no Windows-only crates - checked
+# directly), so the "Windows only" limitation was purely a distribution gap,
+# not an architectural one. This workflow closes that gap: same three
+# sidecars (aetheria, aetheria-delegate, freenet), same `tauri.conf.json`,
+# just built natively on each OS's own GitHub-hosted runner.
+#
+# The bundled Freenet sidecar is built from source via `cargo install
+# freenet` (the same package/version root CLAUDE.md documents fdev's sibling
+# tool as - see `refresh-latest-feed.yml`'s identical install step) rather
+# than copied from a pre-built download, which sidesteps needing a
+# per-platform prebuilt Freenet binary to source from at all. See
+# THIRD_PARTY_LICENSES.md for why bundling this AGPL-3.0 binary alongside
+# Aetheria's own (MIT/Apache-2.0) binaries doesn't AGPL-license Aetheria
+# itself - that reasoning is unchanged by building from source instead of
+# copying a binary; either way it's the unmodified upstream project, and
+# Aetheria only ever talks to it over its network API.
+#
+# NOTE: written and reviewed carefully, but - same caveat as
+# `refresh-latest-feed.yml` - a real run on GitHub's own infrastructure has
+# not been observed from this environment (no `gh` CLI available here, see
+# root CLAUDE.md's environment notes). The macOS and Linux legs in
+# particular have never been exercised anywhere, not even manually, since
+# this dev machine is Windows-only. Check the Actions tab after this first
+# merges/runs, especially for: Linux's Tauri system-dependency list (the
+# `apt-get install` step below is Tauri's own documented v2 dependency list,
+# not independently verified against this app's exact plugin set), and
+# whether `cargo install freenet` compiles cleanly on a fresh macOS/Linux
+# runner within the job's time budget (it's a real node, not a small crate -
+# `refresh-latest-feed.yml` caches this same install specifically because it
+# is slow).
+#
+# Unsigned installers: none of the three platforms have code-signing
+# configured (no cert). Windows will show a SmartScreen warning (already
+# documented in root CLAUDE.md); macOS Gatekeeper will very likely refuse to
+# open the unsigned `.app` at all without the user right-clicking ->
+# Open (or `xattr -d com.apple.quarantine`) - a real, unresolved friction
+# point for macOS users, worth calling out rather than assuming parity with
+# Windows's "just a scary warning" experience.
+
+name: Build desktop app
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "delegate/**"
+      - "contracts/**"
+      - ".github/workflows/build-desktop.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            rust-target: x86_64-pc-windows-msvc
+            exe-suffix: ".exe"
+          - os: macos-latest
+            rust-target: aarch64-apple-darwin
+            exe-suffix: ""
+          - os: ubuntu-latest
+            rust-target: x86_64-unknown-linux-gnu
+            exe-suffix: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tauri v2's own documented Linux dependency list (webkit2gtk for the
+      # webview, appindicator for the tray icon this app uses, rsvg for icon
+      # processing) - not independently re-derived, just copied from
+      # https://v2.tauri.app/start/prerequisites/#linux.
+      - name: Install Linux build dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libxdo-dev \
+            build-essential \
+            curl \
+            wget \
+            file
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Same slow-part-only cache split as refresh-latest-feed.yml: the
+      # cargo-installed `freenet` binary changes roughly never, so cache it
+      # per-OS (each runner needs its own native build) rather than
+      # recompiling a full node from source on every push.
+      - name: Cache cargo-installed freenet
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin
+          key: cargo-tools-freenet-${{ matrix.os }}-v1
+
+      - name: Install freenet (if not cached)
+        shell: bash
+        run: |
+          command -v freenet >/dev/null || cargo install freenet --locked
+
+      - name: Build aetheria-delegate (release)
+        run: cargo build --release --manifest-path delegate/Cargo.toml --bin aetheria-delegate
+
+      - name: Install frontend dependencies
+        run: npm ci --prefix app
+
+      # Tauri resolves a sidecar named "aetheria-delegate" in
+      # tauri.conf.json's `bundle.externalBin` by looking for
+      # `binaries/aetheria-delegate-<host-target-triple><exe-suffix>` at
+      # build time (see root CLAUDE.md's "Sidecar binary naming" note, which
+      # documents this exact convention for the Windows case this reuses).
+      - name: Stage sidecar binaries
+        shell: bash
+        run: |
+          mkdir -p app/src-tauri/binaries
+          cp "delegate/target/release/aetheria-delegate${{ matrix.exe-suffix }}" \
+             "app/src-tauri/binaries/aetheria-delegate-${{ matrix.rust-target }}${{ matrix.exe-suffix }}"
+          cp "$(command -v freenet)" \
+             "app/src-tauri/binaries/freenet-${{ matrix.rust-target }}${{ matrix.exe-suffix }}"
+
+      - name: Build Tauri app and installers
+        run: npm run build:desktop --prefix app
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: aetheria-${{ matrix.rust-target }}
+          path: builds/
+          if-no-files-found: error

@@ -1337,6 +1337,102 @@ be two separate real bugs stacking:
 All 16 non-network delegate unit tests pass, `tsc` is clean, and
 `npm run build:desktop` succeeds with no warnings.
 
+## Why Aetheria isn't a pure Freenet web-container app, and cross-platform builds (as of 2026-08-06)
+
+Prompted by real feedback on r/Freenet: a commenter asked why Aetheria needs
+an installer at all, when "standard" Freenet apps are supposed to be a WASM
+contract serving a UI straight from the local node's browser proxy, and
+separately pointed out the installer only targets Windows. Investigated
+both, with one real finding worth keeping and one real fix shipped.
+
+### The web-container path was tried for real, and it's a dead end for this app's architecture
+
+Freenet's actual "standard path" (confirmed by reading the manual and by
+studying `freenet/freenet-microblogging`, an official example app in the
+same domain as Aetheria - social/publishing, with its own identity/signing
+delegate) is: UI as static HTML/CSS/JS published as a **web-container
+contract** (`fdev website init`/`publish`/`update`), served by the local
+node's own HTTP proxy at `http://<node>/v1/contract/web/<key>/`, with
+private-key custody handled by a **Freenet delegate** - not a native
+process, but a WASM component loaded into the user's own node, reachable
+only via the node's own message-passing API.
+
+**Verified live** against this machine's real running node
+(`aetheria-test` key, `fdev website init`/`publish`): built `app/`'s
+existing Vite frontend (after adding `base: "./"` to `vite.config.ts`, so
+its asset paths resolve when served from a nested contract path rather than
+site root - harmless for the Tauri build too, which loads from its own
+custom protocol) and published it for real, producing a working
+`/v1/contract/web/<key>/` URL that the real node served with a 200 and the
+correct `index.html`/JS/CSS bytes.
+
+**Then found the actual blocker**, by reading the node's own served wrapper
+script (`freenetBridge`, the shim that lets a sandboxed contract iframe use
+`WebSocket` at all) rather than assuming from the manual: every `open`
+request is checked against `LOCAL_API_ORIGIN` and refused unless
+`protocol://host` matches **the node's own origin exactly** - literal
+source comment: *"Security: only allow WebSocket connections to the local
+API server itself."* This is a deliberate, heavily-defended sandbox
+boundary (auth-token injection, fail-closed hosted mode, per-user token
+namespacing, anti-SSRF) - not a bug, not version-specific.
+
+The consequence: a web-container-hosted UI **cannot** open a socket to
+`ws://127.0.0.1:47021` (this app's native delegate) no matter what OS it's
+built for - only back to the node it was served from. Since Aetheria's
+entire trust model (`delegate/`'s Argon2id/AES-GCM identity encryption,
+Ed25519 signing, SQLite cache, `watcher.rs`'s live-subscription push) lives
+in that separate native process, the only way to get a genuine
+zero-install "paste a URL into any browser" experience would be porting all
+of that into a real WASM Freenet delegate running inside the node itself -
+a large rewrite (WASM delegates only have a documented secrets-storage +
+messaging API, no confirmed general local DB or background timers - the
+system tray, OS toast notifications, and single-instance enforcement this
+file documents above would need to be dropped or rethought). Deliberately
+not started - see "Known stub" below. This finding, not a guess, is the
+honest answer to "why not a pure webapp": the sandbox forecloses a cheap
+middle ground, not that nobody looked into it.
+
+### What shipped instead: cross-platform native builds
+
+The narrower complaint - "why Windows only" - had a real, cheap fix once
+checked: nothing in `delegate/` or `app/src-tauri/` is actually
+Windows-specific (no `cfg(windows)`, no Windows-only crates - grepped
+directly), so the Windows-only installer was a distribution gap, not an
+architectural one. `.github/workflows/build-desktop.yml` (new) builds the
+same three sidecars (`aetheria`, `aetheria-delegate`, `freenet`) natively on
+Windows, macOS, and Linux GitHub-hosted runners and uploads each platform's
+installer as a workflow artifact. The bundled Freenet sidecar is built from
+source via `cargo install freenet` on every platform (same package/version
+`refresh-latest-feed.yml` already uses) rather than sourced from a
+per-platform prebuilt download - sidesteps needing to find/trust a binary
+for each OS. `app/scripts/copy-build-artifacts.mjs` was made
+platform-aware (binary suffix by `process.platform`, installer glob widened
+to `.dmg`/`.app`/`.deb`/`.AppImage`/`.rpm`, `.app` bundles copied
+recursively since they're directories) - it previously hardcoded `.exe`
+paths and would have silently produced nothing on macOS/Linux.
+
+**Honesty note, same caveat as `refresh-latest-feed.yml`**: written and
+reviewed carefully, but not observed running on GitHub's own infrastructure
+from this environment (no `gh` CLI here - see the environment notes above).
+The macOS and Linux legs have never run anywhere, not even manually, since
+this dev machine is Windows-only - the Windows leg's steps were spot-checked
+locally (`cargo build --release --bin aetheria-delegate` from `delegate/`
+still builds clean; the Vite `base: "./"` change was rebuilt and its output
+verified to reference `./assets/...` not `/assets/...`), but the full
+`tauri build` pipeline on all three OSes has not been re-run end-to-end
+after these changes. Check the Actions tab after this merges, particularly:
+whether Tauri v2's documented Linux dependency list (webkit2gtk,
+appindicator, rsvg - copied from Tauri's own docs, not independently
+re-derived against this app's exact plugin set) is complete, and whether
+`cargo install freenet` finishes within the job's time budget on a cold
+macOS/Linux runner (it's a real node, not a small crate - slow enough that
+`refresh-latest-feed.yml` caches this same install specifically). Unsigned
+installers remain unsigned on every platform (no cert configured) -
+Windows shows the already-documented SmartScreen warning; macOS Gatekeeper
+will very likely refuse to open the unsigned `.app` outright without the
+user right-clicking → Open, a real friction point with no Windows
+equivalent, not yet addressed.
+
 ## Known stub / unimplemented areas
 
 - Payments/subscriptions are not a stub - they were built, verified live,
@@ -1345,3 +1441,10 @@ All 16 non-network delegate unit tests pass, `tsc` is clean, and
 - Proof-of-work spam mitigation (design doc §7) and the pinning daemon
   (§7, §8 Phase 4) are not started. The Latest feed's 1000-entry cap (see
   above) is the closest thing to spam mitigation any part of this app has.
+- A real WASM Freenet delegate (porting `delegate/`'s identity/signing/key-
+  storage logic to run inside the user's own node, so the UI could be a
+  pure web-container app with zero install) is not started - see "Why
+  Aetheria isn't a pure Freenet web-container app" above for why this is a
+  large rewrite, not a quick follow-up, and what native-only features
+  (tray, OS notifications, single-instance enforcement) it would put at
+  risk.

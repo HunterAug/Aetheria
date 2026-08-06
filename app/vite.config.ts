@@ -5,6 +5,13 @@ import react from "@vitejs/plugin-react";
 // the dev server defaults to Vite's standard 5173 instead.
 export default defineConfig({
   plugins: [react()],
+  // Relative asset paths, not root-absolute (`/assets/...`) - required so the
+  // built dist/ still resolves its JS/CSS when served from a Freenet
+  // web-container contract's own URL path (e.g.
+  // `/v1/contract/web/<contract-id>/`) rather than from the site root. Also
+  // harmless for the Tauri build, which loads from its own custom protocol,
+  // not a path-nested URL.
+  base: "./",
   server: {
     port: 5173,
     strictPort: true,
