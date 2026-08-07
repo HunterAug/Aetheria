@@ -1,16 +1,18 @@
 # Builds the desktop app (delegate + bundled Freenet sidecar + Tauri shell)
-# for Windows, macOS, and Linux, and uploads each platform's installer as a
-# workflow artifact.
+# for macOS and Linux, and uploads each platform's installer as a workflow
+# artifact. Windows is deliberately NOT in this matrix - it's still built
+# locally on the Windows dev machine (`scripts/build.sh`), and
+# `scripts/build-all.sh` (new) triggers *this* workflow for "the others"
+# right after that local build finishes, then downloads the results - see
+# that script for the full local-build + trigger + fetch flow.
 #
-# Why this exists: the app was previously only ever built by hand, on one
-# Windows dev machine (see root CLAUDE.md's `scripts/build.sh`, which is
-# deliberately Windows-only - hardcoded `.exe` paths, a hardcoded Windows
-# cargo PATH). Nothing about `delegate/` or `app/src-tauri/` is actually
-# Windows-specific (no `cfg(windows)`, no Windows-only crates - checked
-# directly), so the "Windows only" limitation was purely a distribution gap,
-# not an architectural one. This workflow closes that gap: same three
-# sidecars (aetheria, aetheria-delegate, freenet), same `tauri.conf.json`,
-# just built natively on each OS's own GitHub-hosted runner.
+# on-demand only (as of 2026-08-07): this used to also run on every push to
+# app/**, delegate/**, contracts/** - dropped in favor of workflow_dispatch
+# only, fired exclusively by scripts/build-all.sh when a real release build
+# is wanted, not on every commit. Nothing about `delegate/` or
+# `app/src-tauri/` is actually Windows-specific (no `cfg(windows)`, no
+# Windows-only crates - checked directly), so building these two platforms
+# here is a distribution mechanism, not evidence of platform-specific code.
 #
 # The bundled Freenet sidecar is built from source via `cargo install
 # freenet` (the same package/version root CLAUDE.md documents fdev's sibling
@@ -23,13 +25,11 @@
 # copying a binary; either way it's the unmodified upstream project, and
 # Aetheria only ever talks to it over its network API.
 #
-# NOTE: written and reviewed carefully, but - same caveat as
-# `refresh-latest-feed.yml` - a real run on GitHub's own infrastructure has
-# not been observed from this environment (no `gh` CLI available here, see
-# root CLAUDE.md's environment notes). The macOS and Linux legs in
-# particular have never been exercised anywhere, not even manually, since
-# this dev machine is Windows-only. Check the Actions tab after this first
-# merges/runs, especially for: Linux's Tauri system-dependency list (the
+# NOTE: `gh` CLI is now installed on the dev machine (2026-08-07, for
+# `scripts/build-all.sh`), so unlike every other workflow's honesty-note in
+# this repo, this one's real-infrastructure runs actually are observable
+# now. Still worth checking the Actions tab on the first `build-all.sh` run
+# after this change, especially: Linux's Tauri system-dependency list (the
 # `apt-get install` step below is Tauri's own documented v2 dependency list,
 # not independently verified against this app's exact plugin set), and
 # whether `cargo install freenet` compiles cleanly on a fresh macOS/Linux
@@ -37,25 +37,18 @@
 # `refresh-latest-feed.yml` caches this same install specifically because it
 # is slow).
 #
-# Unsigned installers: none of the three platforms have code-signing
-# configured (no cert). Windows will show a SmartScreen warning (already
-# documented in root CLAUDE.md); macOS Gatekeeper will very likely refuse to
-# open the unsigned `.app` at all without the user right-clicking ->
-# Open (or `xattr -d com.apple.quarantine`) - a real, unresolved friction
-# point for macOS users, worth calling out rather than assuming parity with
-# Windows's "just a scary warning" experience.
+# Unsigned installers: neither platform built here has code-signing
+# configured (no cert, same as the locally-built Windows installer). macOS
+# Gatekeeper will very likely refuse to open the unsigned `.app` at all
+# without the user right-clicking -> Open (or `xattr -d
+# com.apple.quarantine`) - a real, unresolved friction point, worth calling
+# out rather than assuming parity with Windows's "just a scary warning"
+# experience.
 
 name: Build desktop app
 
 on:
   workflow_dispatch: {}
-  push:
-    branches: [main]
-    paths:
-      - "app/**"
-      - "delegate/**"
-      - "contracts/**"
-      - ".github/workflows/build-desktop.yml"
 
 permissions:
   contents: read
@@ -66,9 +59,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: windows-latest
-            rust-target: x86_64-pc-windows-msvc
-            exe-suffix: ".exe"
           - os: macos-latest
             rust-target: aarch64-apple-darwin
             exe-suffix: ""
@@ -99,25 +89,58 @@ jobs:
             file
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
 
       - uses: actions/setup-node@v4
         with:
           node-version: 20
 
       # Same slow-part-only cache split as refresh-latest-feed.yml: the
-      # cargo-installed `freenet` binary changes roughly never, so cache it
-      # per-OS (each runner needs its own native build) rather than
-      # recompiling a full node from source on every push.
-      - name: Cache cargo-installed freenet
+      # cargo-installed `freenet`/`fdev` binaries change roughly never, so
+      # cache them per-OS (each runner needs its own native build) rather
+      # than recompiling a full node from source on every push.
+      - name: Cache cargo-installed tools
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin
-          key: cargo-tools-freenet-${{ matrix.os }}-v1
+          key: cargo-tools-freenet-fdev-${{ matrix.os }}-v1
 
-      - name: Install freenet (if not cached)
+      # Compiled contract WASM doesn't depend on the host OS (same
+      # wasm32-unknown-unknown target either way), so this cache - unlike
+      # the one above - is deliberately not keyed by matrix.os and can be
+      # shared between the macOS and Linux jobs.
+      - name: Cache compiled contract WASM
+        uses: actions/cache@v4
+        with:
+          path: contracts/*/build/
+          key: contract-wasm-${{ hashFiles('contracts/**/*.rs', 'contracts/**/Cargo.toml') }}
+
+      - name: Install freenet + fdev (if not cached)
         shell: bash
         run: |
           command -v freenet >/dev/null || cargo install freenet --locked
+          command -v fdev >/dev/null || cargo install fdev --locked
+
+      # aetheria-delegate's lib embeds each contract's compiled WASM via
+      # include_bytes! (see delegate/src/contracts.rs) - it won't compile
+      # without these existing first. Same fdev-workspace-root-bug
+      # workaround as refresh-latest-feed.yml's identical step (see root
+      # CLAUDE.md's environment notes for why CARGO_TARGET_DIR is needed).
+      # Missing entirely was the actual cause of every job in this
+      # workflow's very first real run failing identically at the delegate
+      # build step - not GitHub infra, not a per-platform issue.
+      - name: Build contract WASM (skipped if cache hit)
+        shell: bash
+        run: |
+          for contract in post-data-contract content-index-contract publisher-profile-contract global-directory-contract; do
+            if [ ! -f "contracts/$contract/build/freenet/${contract//-/_}" ]; then
+              echo "==> fdev build $contract"
+              (cd "contracts/$contract" && CARGO_TARGET_DIR=./target fdev build)
+            else
+              echo "==> $contract already built (cache hit)"
+            fi
+          done
 
       - name: Build aetheria-delegate (release)
         run: cargo build --release --manifest-path delegate/Cargo.toml --bin aetheria-delegate

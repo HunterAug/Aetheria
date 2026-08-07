@@ -24,8 +24,13 @@ name: Refresh Latest-feed snapshot
 
 on:
   schedule:
-    # Every 30 minutes. GitHub's scheduler is best-effort, not exact.
-    - cron: "*/30 * * * *"
+    # Once a day at 12:00 UTC. GitHub's scheduler is best-effort, not exact.
+    # Was every 30 minutes - dropped since the snapshot now accumulates
+    # history (see snapshot_latest_feed.rs's module docs) rather than just
+    # mirroring current network state, so there's much less value in a tight
+    # refresh interval, and a daily run means far fewer scheduled minutes
+    # spent starting a fresh node from cold each time.
+    - cron: "0 12 * * *"
   workflow_dispatch: {}
 
 permissions:
