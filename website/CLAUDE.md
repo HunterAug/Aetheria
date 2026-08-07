@@ -12,12 +12,17 @@ assuming a bug.
 ## Pages
 
 - `/` - landing page.
-- `/download` - download page. Two real files served as static assets from
-  `public/downloads/`: `Aetheria-Setup-x64.exe` (full NSIS installer,
-  bundles Freenet) and `Aetheria-app-only-x64.zip` (just `aetheria.exe` +
-  `aetheria-delegate.exe`, for people already running their own Freenet
-  node). Deliberately **not** GitHub Releases - the user wants the files
-  served directly from this site.
+- `/download` - download page, publicly live (no gate - see "Release gate
+  removed" below). Real files served as static assets from
+  `public/downloads/`, one section per platform: Windows
+  (`Aetheria-Setup-x64.exe` full NSIS installer bundling Freenet, and
+  `Aetheria-app-only-x64.zip` for people already running their own node),
+  macOS (`Aetheria-Setup-macos-arm64.dmg`, Apple Silicon only), and Linux
+  (`Aetheria-x86_64.AppImage`, `Aetheria-amd64.deb`, `Aetheria-x86_64.rpm`
+  - see root CLAUDE.md's "Why Aetheria isn't a pure Freenet web-container
+  app, and cross-platform builds" for how these get built). Deliberately
+  **not** GitHub Releases - the user wants the files served directly from
+  this site.
 - `/docs`, `/docs/getting-started`, `/docs/faq`, `/docs/security` - plain-
   language documentation for non-technical users, translating concepts
   already documented in the root `CLAUDE.md` (passphrase/no-recovery,
@@ -66,42 +71,20 @@ on-demand per visitor. Instead:
   (this is why the CI workflow also writes to a `.new` file first, see its
   "Run snapshot" step).
 
-## Release gate
+## Release gate removed (as of 2026-08-07)
 
-`IsReleased` env var (`lib/config.ts`'s `isReleased()`, `=== "true"` check -
-any other value, including unset, is treated as `false` and fails closed)
-gates every download button on the site (`app/page.tsx`'s hero CTA,
-`app/download/page.tsx`'s two file buttons). While `false`, those render a
-"Coming soon!" message instead of a link - the actual files under
-`public/downloads/` still exist and are technically reachable by direct
-URL, this is a UI-level gate, not real access control. Flip it in Vercel's
-project settings (Environment Variables) when actually ready to launch; see
-`.env.example` for local testing (copy to `.env.local`, gitignored).
-
-### Private preview bypass
-
-`isReleased()` also returns `true` if the visitor holds a cookie named
-`aetheria_preview` (see `PREVIEW_COOKIE_NAME` in `lib/config.ts`) - this
-lets Hunter share the real download links with specific people before
-flipping `IsReleased` on for everyone.
-
-- Visiting `https://aetherianode.com/<PREVIEW_ACCESS_KEY>` sets that cookie
-  (`app/[key]/route.ts` - a dynamic single-segment route that only matches
-  when no static route already claims the path, so it never shadows
-  `/download`, `/docs`, etc.) and redirects to `/`. Wrong or missing key just
-  redirects home with no cookie set - no error page distinguishing valid
-  from invalid keys.
-- The key itself lives in the `PREVIEW_ACCESS_KEY` env var (Vercel project
-  settings, or `.env.local` for local testing - see `.env.example`), never
-  committed. Compared with `crypto.timingSafeEqual` to avoid a timing
-  side-channel.
-- Because `isReleased()` now reads a per-request cookie via `next/headers`,
-  `/` and `/download` are dynamically rendered (can't be statically
-  pre-rendered at build time) - expected and fine for a low-traffic
-  marketing site.
-- To rotate the key: generate a new random value, update
-  `PREVIEW_ACCESS_KEY` in Vercel, send out the new link. The old key stops
-  working immediately since there's nothing stateful to invalidate.
+The site used to gate every download button behind an `IsReleased` env var
+(`lib/config.ts`'s `isReleased()`) plus a private-preview-cookie bypass
+(`app/[key]/route.ts`, visiting `/<PREVIEW_ACCESS_KEY>`) for sharing real
+download links before flipping that var on for everyone - see git history
+around 2026-08-03 for how that worked. Removed outright, not just flipped
+to `true`: the user was ready for a real public launch, at which point a
+soft-launch/preview-only gate is dead weight rather than a feature to keep
+around. `lib/config.ts` and `app/[key]/route.ts` are deleted; `/` and
+`/download` now render their real content unconditionally (and are
+statically prerenderable again, since neither reads request cookies
+anymore). `.env.example` is gone too - there's no env var left for a fresh
+clone to configure.
 
 ## Deploying
 

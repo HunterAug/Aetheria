@@ -1,5 +1,4 @@
 import Link from "next/link";
-import { isReleased } from "@/lib/config";
 
 const FEATURES = [
   {
@@ -20,8 +19,7 @@ const FEATURES = [
   },
 ];
 
-export default async function Home() {
-  const released = await isReleased();
+export default function Home() {
   return (
     <div>
       <section className="max-w-5xl mx-auto px-6 pt-20 pb-16 text-center">
@@ -34,21 +32,12 @@ export default async function Home() {
           Read what others are writing. Follow the voices you trust. Build an audience that's truly yours. Aetheria is a decentralized social network that works without servers, algorithms, or platforms. Just peer-to-peer connections between writers and readers. Your posts live on your readers' devices forever. Your audience is yours to keep. And no company can ever shut you down, change the rules, or take it away.
         </p>
         <div className="mt-8 flex items-center justify-center gap-4">
-          {released ? (
-            <Link
-              href="/download"
-              className="rounded-lg aetheria-gradient text-white text-sm font-semibold px-6 py-3 shadow-lg shadow-aeblue-600/20 hover:brightness-110 transition"
-            >
-              Download for Windows
-            </Link>
-          ) : (
-            <span
-              aria-disabled="true"
-              className="rounded-lg border border-ink-700 text-sm font-semibold px-6 py-3 text-neutral-500 cursor-not-allowed select-none"
-            >
-              Coming soon!
-            </span>
-          )}
+          <Link
+            href="/download"
+            className="rounded-lg aetheria-gradient text-white text-sm font-semibold px-6 py-3 shadow-lg shadow-aeblue-600/20 hover:brightness-110 transition"
+          >
+            Download
+          </Link>
           <Link
             href="/docs"
             className="rounded-lg border border-ink-700 text-sm font-semibold px-6 py-3 text-neutral-300 hover:bg-ink-900 transition"
