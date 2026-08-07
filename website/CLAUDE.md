@@ -38,6 +38,15 @@ on-demand per visitor. Instead:
   `aetheria-delegate` crate, reusing `contracts::fetch_global_directory` -
   read-only, no keys, no writes) connects to a real Freenet node and dumps
   the shared `GlobalDirectoryContract`'s current entries as JSON.
+- **This accumulates rather than mirrors** (as of 2026-08-07): the tool
+  takes the previous `latest-feed.json` as an optional arg and merges its
+  entries with whatever the network returns this run, keyed by
+  `post_contract_id`, capped at 100 (oldest evicted first) - so a post stays
+  visible on the website even after it's fallen out of the live
+  `GlobalDirectoryContract` view (that contract has its own, separate
+  1000-entry cap and evicts its own oldest on overflow; Freenet can also
+  prune a contract's state independently of that). See that file's module
+  docs for the exact merge rule.
 - That JSON is committed to `public/data/latest-feed.json` and the `/latest`
   page (`app/latest/page.tsx`) reads it as a plain file at request/build
   time via `fs.readFileSync` - no client-side fetch, no API route.
@@ -50,8 +59,12 @@ on-demand per visitor. Instead:
   root CLAUDE.md's changelog around 2026-08-03) - a real always-on backend
   is the upgrade path if that tradeoff ever needs revisiting.
 - To refresh it by hand: from `delegate/`, run
-  `cargo run --release --bin snapshot-latest-feed > ../website/public/data/latest-feed.json`
-  against a real reachable Freenet node, then commit the file.
+  `cargo run --release --bin snapshot-latest-feed ../website/public/data/latest-feed.json > /tmp/latest-feed.json && mv /tmp/latest-feed.json ../website/public/data/latest-feed.json`
+  against a real reachable Freenet node, then commit the file. The previous-
+  snapshot path must differ from wherever stdout is redirected to - a plain
+  `>` truncates its target before the process gets a chance to read it back
+  (this is why the CI workflow also writes to a `.new` file first, see its
+  "Run snapshot" step).
 
 ## Release gate
 

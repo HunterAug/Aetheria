@@ -96,15 +96,45 @@ jobs:
           done
           # A freshly-started node with zero prior peers needs real time
           # beyond "port is open" to get useful ring connections (see root
-          # CLAUDE.md's "real network is flaky" note) - the snapshot tool's
-          # own GET call already retries with backoff on top of this, so
-          # this is a head start, not the only thing standing between a
-          # cold node and a successful fetch.
+          # CLAUDE.md's "real network is flaky" note). This head start used
+          # to be the *only* thing standing between a cold node and a
+          # successful fetch (one flat 30s sleep, then one snapshot attempt)
+          # - which is exactly why roughly half the scheduled runs failed:
+          # real gateway connect time varies more than a single fixed guess
+          # can cover. "Run snapshot" below now retries instead, so this
+          # only needs to be a reasonable head start, not a number picked to
+          # cover the worst case outright.
           echo "==> giving it time to find peers..."
-          sleep 30
+          sleep 45
 
       - name: Run snapshot
-        run: ./delegate/target/release/snapshot-latest-feed > website/public/data/latest-feed.json
+        run: |
+          # Retrying the whole step (not just the tool's own internal
+          # per-request retries in freenet_bridge.rs, which only cover ~6s
+          # of flakiness) gives a slow-to-connect node much more real time
+          # to find peers before this gives up, without making every run pay
+          # a large fixed sleep upfront - a fast-connecting node still exits
+          # after its first successful attempt.
+          #
+          # `latest-feed.json` is passed in for merging (see
+          # snapshot_latest_feed.rs's module docs) but never itself the
+          # redirect target - `>` truncates its target before this process
+          # would get a chance to read it, so output goes to a temp file
+          # first and is moved into place only once the tool actually
+          # succeeds.
+          for attempt in $(seq 1 6); do
+            echo "==> snapshot attempt $attempt"
+            if ./delegate/target/release/snapshot-latest-feed website/public/data/latest-feed.json \
+                > website/public/data/latest-feed.json.new; then
+              mv website/public/data/latest-feed.json.new website/public/data/latest-feed.json
+              exit 0
+            fi
+            rm -f website/public/data/latest-feed.json.new
+            echo "==> attempt $attempt failed, giving the node more time to find peers"
+            sleep 20
+          done
+          echo "==> all attempts failed"
+          exit 1
 
       - name: Stop Freenet node
         if: always()
